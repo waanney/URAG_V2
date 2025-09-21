@@ -6,3 +6,5 @@ uv pip install -r requirements.txt
 
 # Hoặc chạy trực tiếp mà không cần venv thủ công
 uv run python script.pyu
+
+export PYTHONPATH="$PWD"
