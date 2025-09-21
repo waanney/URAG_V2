@@ -54,14 +54,14 @@ class TestSemanticChunker(unittest.TestCase):
     # def test_save_outputs_to_json(self):
     #     """Should save outputs to JSON and read them back."""
     #     outputs = ["Mô tả A", "Mô tả B"]
-    #     sc.save_outputs_to_json(outputs, "chunk_outputs.json")
-    #     with open("chunk_outputs.json", "r", encoding="utf-8") as f:
+    #     sc.save_outputs_to_json(outputs, "testing_chunk_outputs.json")
+    #     with open("testing_chunk_outputs.json", "r", encoding="utf-8") as f:
     #         data = json.load(f)
     #     self.assertEqual(data, outputs)
 
     def test_semantic_chunker_main_real_input(self):
-        """Run the full pipeline on input_1.txt."""
-        test_file = os.path.join("examples", "semanticChunker_Test_input", "semanticChunker_Test_Input_1.txt")
+        """Run the full pipeline on input_2.txt."""
+        test_file = os.path.join("examples", "semanticChunker_Test_input", "semanticChunker_Test_Input_2.txt")
         sc.semantic_chunker(test_file)
 
         with open("semantic_chunks.json", "r", encoding="utf-8") as f:
