@@ -17,7 +17,6 @@ if not API_KEY:
 
 client = genai.Client(api_key=API_KEY)
 
-
 # ========================
 # Data Models
 # ========================
@@ -33,18 +32,28 @@ class LLMResponse(BaseModel):
 # ========================
 def build_prompt(chunk: Chunk) -> str:
     return f"""
-You are a semantic chunker.
-Your task:
-1. Read the following text chunk.
-2. Write a single, short, one-sentence summary in Vietnamese.
-3. Return the result strictly as a JSON object in this format:
+# TASK: Vietnamese Quick Description Generation 
 
-{{
-  "title_or_quick_description": "..."
-}}
-{{
-  "title_or_quick_description": "..."
-}}
+## ROLE
+You are an expert in crafting concise, single-sentence descriptions that capture the main content of a text chunk.
+---------------------
+## GOAL
+Split the provided input text into multiple semantic chunks. Each chunk should represent a coherent and self-contained idea or topic. Preserve the original wording inside each chunk without rewriting or summarizing.
+---------------------
+## GUIDELINES
+1. **Core Focus:**
+   * Analyze the rewritten text chunk to identify its key message or theme.
+   * Do not repeat the text verbatim; instead, paraphrase into a clearer summary.
+2. **Language:**
+   * Input and output are in Vietnamese.
+   * Do not mix in English words unless they appear in the original text.
+3. **Conciseness:**
+   * The description must be exactly **one grammatically complete sentence**, ending with a period.
+4. **Output Format:**
+Always return exactly one JSON object, wrapped inside a JSON array, like this:
+[
+  {{"title_or_quick_description": "..."}},
+]
 
 ## Đoạn văn cần tóm tắt:
 \"\"\"{chunk.text}\"\"\"
@@ -66,7 +75,6 @@ def call_llm(prompt: str) -> str:
         raise ValueError(f"No text in LLM response: {resp}")
     return text.strip()
 
-
 def safe_json_parse(raw: str):
     """
     Try to extract JSON if Gemini adds extra text around it.
@@ -80,8 +88,7 @@ def safe_json_parse(raw: str):
             return json.loads(match.group(0))
         raise
 
-
-def process_chunk(chunk: Chunk) -> str:
+def process_chunk(chunk: Chunk) -> List[str]:
     if not chunk.text.strip():
         raise ValueError("Empty chunk passed to LLM")
 
@@ -90,8 +97,20 @@ def process_chunk(chunk: Chunk) -> str:
 
     try:
         parsed = safe_json_parse(raw)
-        validated = LLMResponse(**parsed)
-        return validated.title_or_quick_description
+
+        # Nếu là list JSON
+        if isinstance(parsed, list):
+            validated = [LLMResponse(**item) for item in parsed]
+            return [v.title_or_quick_description for v in validated]
+
+        # Nếu là một object JSON
+        elif isinstance(parsed, dict):
+            validated = LLMResponse(**parsed)
+            return [validated.title_or_quick_description]
+
+        else:
+            raise ValueError(f"Unexpected JSON type: {type(parsed)}")
+
     except (json.JSONDecodeError, ValidationError) as e:
         raise ValueError(f"Invalid LLM response: {raw}") from e
 
@@ -103,10 +122,27 @@ def semantic_chunk(text: str) -> List[Chunk]:
     paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
     return [Chunk(text=p) for p in paragraphs]
 
-
 def semantic_chunker_pipeline(text: str) -> List[str]:
     chunks = semantic_chunk(text)
-    return [process_chunk(chunk) for chunk in chunks]
+    outputs = []
+    for chunk in chunks:
+        outputs.extend(process_chunk(chunk))
+    return outputs
+
+
+# ========================
+# File Reader
+# ========================
+def read_txt_file(filepath: str) -> str:
+    """
+    Read the full content of a .txt file as a string.
+    """
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"File not found: {filepath}")
+    
+    with open(filepath, "r", encoding="utf-8") as file:
+        return file.read()
+
 
 # ========================
 # Save Outputs
@@ -118,28 +154,27 @@ def save_outputs_to_json(outputs: List[str], filename: str = "chunk_outputs.json
     """
     with open(filename, "w", encoding="utf-8") as file:
         json.dump(outputs, file, ensure_ascii=False, indent=2)
-    print(f"✅ Outputs saved to {filename}")
+    # print(f"✅ Outputs saved to {filename}")
 
 # ========================
 # Example Usage
 # ========================
-if __name__ == "__main__":
-    input_text = """
-    Các mốc thời gian quan trọng
 
-Năm 1957: Trung tâm Quốc gia Kỹ thuật được thành lập theo Sắc lệnh 213-GD ngày 29/06/1957, gồm 4 trường kỹ thuật, công nghệ và chuyên nghiệp: Trường Cao Đẳng Công Chánh, Trường Vô tuyến Điện, Trường Hàng Hải Thương Thuyền và Trường Thương Mại.
-
-1972: Trung tâm Quốc gia Kỹ thuật được đổi tên thành Học viện Quốc gia Kỹ thuật theo Sắc lệnh 135SL/GD ngày 15/9/1972 và Sắc lệnh số 53-SL/GD ngày 21/3/1973, gồm 6 trường thành viên.
-
-1974: Học viện Quốc gia Kỹ thuật được đổi tên thành Trường Đại học Kỹ thuật và là thành viên của Viện Đại học Bách khoa Thủ Đức.
-
-1976: Trường được mang tên Trường Đại học Bách khoa theo Quyết định số 426/TTg ngày 27/10/1976.
-
-1996: Trường được mang tên Trường Đại học Kỹ thuật trực thuộc Đại học Quốc gia TP. Hồ Chí Minh theo Quyết định số 1235/GD-ĐT ngày 30/3/1996.
-
-2001: Trường được mang tên Trường Đại học Bách khoa theo Quyết định số 15/2001/QĐ-TTg của Thủ tướng Chính phủ về việc tổ chức lại Đại học Quốc gia thành phố Hồ Chí Minh.
-    """
+def semantic_chunker(filepath):
+    input_text = read_txt_file(filepath)
+    
     outputs = semantic_chunker_pipeline(input_text)
-    print(outputs)
+    # print(outputs)
 
     save_outputs_to_json(outputs, "semantic_chunks.json")
+
+# if __name__ == "__main__":
+# #     input_text = """
+# # Trường Đại học Bách khoa - ĐHQG-HCM  là một trường thành viên của hệ thống Đại học Quốc gia TP. Hồ Chí Minh. Tiền thân của Trường là Trung tâm Quốc gia Kỹ thuật được thành lập vào năm 1957. Hiện nay, Trường ĐH Bách Khoa là trung tâm đào tạo, nghiên cứu khoa học và chuyển giao công nghệ lớn nhất các tỉnh phía Nam và là trường đại học kỹ thuật quan trọng của cả nước.    """
+    
+#     input_text = read_txt_file(r"D:\Admin\Documents\CodeSavingMain\1_URA\Proj\DLTooClose\URAG_V2\example_Input.txt")
+    
+#     outputs = semantic_chunker_pipeline(input_text)
+#     # print(outputs)
+
+#     save_outputs_to_json(outputs, "semantic_chunks.json")
