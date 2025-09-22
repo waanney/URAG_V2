@@ -1,3 +1,4 @@
+# Updated semanticChunker.py
 from typing import List
 from pydantic import BaseModel, Field, ValidationError
 import os
@@ -19,64 +20,61 @@ if not API_KEY:
 client = genai.Client(api_key=API_KEY)
 
 # ========================
-# Data Models
+# Data Models (kept minimal)
 # ========================
 class Chunk(BaseModel):
     text: str
 
+# keep an optional model for backward compatibility if LLM returns objects with this key
 class LLMResponse(BaseModel):
-    title_or_quick_description: str = Field(..., min_length=3)
-
+    title_or_quick_description: str = Field(..., min_length=1)
 
 # ========================
-# Prompt Builder
+# Prompt Builder (updated)
 # ========================
 def build_prompt(chunk: Chunk) -> str:
+    """
+    NOTE: We now request a single JSON ARRAY of STRINGS.
+    Each string is a semantic chunk (may contain multiple sentences).
+    """
     return f"""
-# TASK: Vietnamese Quick Description Generation with Hybrid Semantic Chunking
+# TASK: Hybrid Semantic Chunking of Text
 
 ## ROLE
-You are an expert in crafting concise, single-sentence descriptions that capture the main content of a text chunk, and in adjusting semantic chunking when necessary.
+You are an expert in semantic chunking — the process of dividing text into coherent, self-contained units based on meaning.
 
----------------------
 ## GOAL
-Your task is:
-1. Analyze the provided rewritten text chunk.
-2. If the chunk already makes sense semantically, generate a **single-sentence title/quick description**.
-3. If the chunk still contains multiple distinct ideas, you are allowed to **mentally split it into smaller sub-chunks** and generate **one description per sub-chunk**. Each description must be a separate JSON object inside the returned array.
+1. Analyze the provided text.
+2. Segment it into **semantic chunks**. Each chunk should be a coherent unit of meaning. A chunk **may contain multiple sentences** if they belong together conceptually.
+3. Avoid splitting an idea across two chunks. Prefer grouping related sentences (definition, example, enumeration, consequences) into the same chunk.
 
----------------------
 ## GUIDELINES
-1. **Core Focus:**
-   * Identify the main idea(s) of the chunk or its sub-parts.
-   * If splitting, ensure each description corresponds to one coherent semantic unit.
-2. **Language:**
-   * Input and output are in Vietnamese.
-   * Do not mix in English words unless they appear in the original text.
-3. **Conciseness:**
-   * Each description must be exactly **one grammatically complete sentence**, ending with a period.
-4. **Output Format:**
-   * Return the final output in strict JSON format with a single key "title_or_quick_description".
-   * Always return exactly one JSON array.  
-   Example (for multiple sub-chunks):
+- Treat each paragraph (separated by blank lines) as one semantic chunk, unless the paragraph is excessively long.
+- Do NOT split every sentence individually. Keep multiple related sentences together inside the same chunk.
+- **If a paragraph contains a heading and list items, keep the heading and the whole list in ONE single chunk. Do NOT split list items into separate chunks.**
+- If a paragraph is too long (exceeds reasonable chunk size), then and only then split it into smaller coherent chunks.
+- Maintain the original language and phrasing as much as possible.
+
+## OUTPUT FORMAT (STRICT JSON)
+Return exactly **one** JSON array of strings. Each element in the array should be one semantic chunk (a string).
+Example:
 [
-  {{"title_or_quick_description": "..."}}
+  "Artificial Intelligence (AI) is a branch of computer science. It focuses on creating machines that can perform tasks that normally require human intelligence.",
+  "Examples include problem-solving, language understanding, and learning from experience."
 ]
 
-## Đoạn văn cần tóm tắt:
-\"\"\"{chunk.text}\"\"\"
+## INPUT:
+\"\"\"{chunk.text}\"\"\" 
 """.strip()
 
-
-
 # ========================
-# LLM Call
+# LLM Call (unchanged)
 # ========================
 def call_llm(prompt: str) -> str:
     resp = client.models.generate_content(
         model=MODEL_NAME,
         contents=prompt,
-        config={"response_mime_type": "application/json"},  # force JSON output
+        config={"response_mime_type": "application/json"},
     )
 
     text = resp.text
@@ -84,19 +82,29 @@ def call_llm(prompt: str) -> str:
         raise ValueError(f"No text in LLM response: {resp}")
     return text.strip()
 
+# ========================
+# Safe JSON parse (improved to find arrays too)
+# ========================
 def safe_json_parse(raw: str):
     """
     Try to extract JSON if Gemini adds extra text around it.
+    Will attempt to find a JSON array first, then object.
     """
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        import re
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
+        # try to find an array [...] or object {...} inside raw
+        arr_match = re.search(r"\[.*\]", raw, re.DOTALL)
+        if arr_match:
+            return json.loads(arr_match.group(0))
+        obj_match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if obj_match:
+            return json.loads(obj_match.group(0))
         raise
 
+# ========================
+# Process chunk (more flexible parsing)
+# ========================
 def process_chunk(chunk: Chunk) -> List[str]:
     if not chunk.text.strip():
         raise ValueError("Empty chunk passed to LLM")
@@ -107,78 +115,98 @@ def process_chunk(chunk: Chunk) -> List[str]:
     try:
         parsed = safe_json_parse(raw)
 
-        # Nếu là list JSON
-        if isinstance(parsed, list):
-            validated = [LLMResponse(**item) for item in parsed]
-            return [v.title_or_quick_description for v in validated]
+        # Case 1: JSON array of strings
+        if isinstance(parsed, list) and all(isinstance(i, str) for i in parsed):
+            return [s.strip() for s in parsed if s and s.strip()]
 
-        # Nếu là một object JSON
-        elif isinstance(parsed, dict):
-            validated = LLMResponse(**parsed)
-            return [validated.title_or_quick_description]
+        # Case 2: JSON array of objects (try common keys)
+        if isinstance(parsed, list) and all(isinstance(i, dict) for i in parsed):
+            results = []
+            for item in parsed:
+                if "title_or_quick_description" in item:
+                    results.append(str(item["title_or_quick_description"]).strip())
+                elif "text" in item:
+                    results.append(str(item["text"]).strip())
+                else:
+                    # fallback: first string value
+                    for v in item.values():
+                        if isinstance(v, str) and v.strip():
+                            results.append(v.strip())
+                            break
+            if results:
+                return results
 
-        else:
-            raise ValueError(f"Unexpected JSON type: {type(parsed)}")
+        # Case 3: single string (raw JSON string)
+        if isinstance(parsed, str):
+            return [parsed.strip()]
 
-    except (json.JSONDecodeError, ValidationError) as e:
+        # Case 4: single object
+        if isinstance(parsed, dict):
+            if "title_or_quick_description" in parsed:
+                return [str(parsed["title_or_quick_description"]).strip()]
+            if "text" in parsed:
+                return [str(parsed["text"]).strip()]
+            # fallback to first string value
+            for v in parsed.values():
+                if isinstance(v, str) and v.strip():
+                    return [v.strip()]
+
+        raise ValueError(f"Unexpected JSON structure from LLM: {type(parsed)} -- raw: {raw}")
+
+    except (json.JSONDecodeError, ValidationError, ValueError) as e:
         raise ValueError(f"Invalid LLM response: {raw}") from e
 
-
 # ========================
-# Semantic Chunking
+# Semantic Chunking (list detection improved)
 # ========================
 def semantic_chunk(text: str, max_chunk_size: int = 800, overlap: int = 100) -> List[Chunk]:
     """
-    Hybrid semantic chunking:
-    1. Split text into paragraphs (\n\n).
-    2. If paragraph too long -> split by sentence.
-    3. If still too long -> sliding window with overlap.
+    Semantic chunking:
+    - Paragraph = tách bằng dòng trống (Windows \r\n hoặc Unix \n\n).
+    - Bên trong 1 paragraph, giữ nguyên các xuống dòng đơn (list items).
+    - Nếu paragraph quá dài thì cắt theo câu.
     """
-    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-    chunks = []
+    import re
 
+    # Chuẩn hóa: đổi tất cả \r\n và \r thành \n
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    # Split đoạn: dựa vào ít nhất 1 dòng trống
+    paragraphs = re.split(r"\n\s*\n", text)
+    paragraphs = [p.strip() for p in paragraphs if p.strip()]
+
+    chunks: List[Chunk] = []
     for para in paragraphs:
-        # Chuẩn hóa whitespace
-        para = re.sub(r'\s+', ' ', para).strip()
+        # Giữ nguyên xuống dòng đơn trong paragraph (cho đẹp list)
+        # Chỉ chuẩn hóa space thừa
+        lines = [l.strip() for l in para.split("\n")]
+        para_norm = "\n".join(lines)
 
-        if len(para) <= max_chunk_size:
-            chunks.append(Chunk(text=para))
+        if len(para_norm) <= max_chunk_size:
+            chunks.append(Chunk(text=para_norm))
             continue
 
-        # Step 2: split into sentences
-        sentences = re.split(r'(?<=[\.!?])\s+', para)
+        # Nếu dài quá thì cắt theo câu
+        sentences = re.split(r'(?<=[\.!?])\s+', para_norm.replace("\n", " "))
         current_chunk = ""
-
         for sentence in sentences:
             if not sentence.strip():
                 continue
-
             if len(current_chunk) + len(sentence) + 1 > max_chunk_size:
                 chunks.append(Chunk(text=current_chunk.strip()))
                 current_chunk = sentence
             else:
-                current_chunk += " " + sentence if current_chunk else sentence
-
+                current_chunk += (" " + sentence) if current_chunk else sentence
         if current_chunk:
             chunks.append(Chunk(text=current_chunk.strip()))
 
-        # Step 3: if any chunk still too long, break into sliding windows
-        final_chunks = []
-        for c in chunks:
-            if len(c.text) > max_chunk_size:
-                text = c.text
-                start = 0
-                while start < len(text):
-                    end = min(start + max_chunk_size, len(text))
-                    window = text[start:end]
-                    final_chunks.append(Chunk(text=window.strip()))
-                    start += max_chunk_size - overlap
-            else:
-                final_chunks.append(c)
-        chunks = final_chunks
-
     return chunks
 
+
+
+# ========================
+# Pipeline & IO (unchanged except robust parsing)
+# ========================
 def semantic_chunker_pipeline(text: str) -> List[str]:
     chunks = semantic_chunk(text)
     outputs = []
@@ -186,52 +214,17 @@ def semantic_chunker_pipeline(text: str) -> List[str]:
         outputs.extend(process_chunk(chunk))
     return outputs
 
-
-# ========================
-# File Reader
-# ========================
 def read_txt_file(filepath: str) -> str:
-    """
-    Read the full content of a .txt file as a string.
-    """
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"File not found: {filepath}")
-    
     with open(filepath, "r", encoding="utf-8") as file:
         return file.read()
 
-
-# ========================
-# Save Outputs
-# ========================
 def save_outputs_to_json(outputs: List[str], filename: str = "chunk_outputs.json"):
-    """
-    Save pipeline outputs to a JSON file.
-    Each summary is stored as an element in a list.
-    """
     with open(filename, "w", encoding="utf-8") as file:
         json.dump(outputs, file, ensure_ascii=False, indent=2)
-    # print(f"✅ Outputs saved to {filename}")
-
-# ========================
-# Example Usage
-# ========================
 
 def semantic_chunker(filepath):
     input_text = read_txt_file(filepath)
-    
     outputs = semantic_chunker_pipeline(input_text)
-    # print(outputs)
-
     save_outputs_to_json(outputs, "semantic_chunks.json")
-
-# if __name__ == "__main__":
-# #     input_text = """
-# # Trường Đại học Bách khoa - ĐHQG-HCM  là một trường thành viên của hệ thống Đại học Quốc gia TP. Hồ Chí Minh. Tiền thân của Trường là Trung tâm Quốc gia Kỹ thuật được thành lập vào năm 1957. Hiện nay, Trường ĐH Bách Khoa là trung tâm đào tạo, nghiên cứu khoa học và chuyển giao công nghệ lớn nhất các tỉnh phía Nam và là trường đại học kỹ thuật quan trọng của cả nước.    """
-    
-#     input_text = read_txt_file(r"D:\Admin\Documents\CodeSavingMain\1_URA\Proj\DLTooClose\URAG_V2\example_Input.txt")
-    
-#     outputs = semantic_chunker_pipeline(input_text)
-#     # print(outputs)
-
-#     save_outputs_to_json(outputs, "semantic_chunks.json")
