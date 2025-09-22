@@ -10,8 +10,13 @@ readme = "README.md"
 requires-python = ">=3.12"
 
 dependencies = [
-  "google-generativeai>=0.8.5",
   "pydantic-ai-slim[google,mistral]",
+  "dotenv>=0.9.9",
+  "google>=3.0.0",
+  "google-generativeai>=0.8.5",
+  "python-dotenv>=1.1.1",
+  "pymilvus>=2.6.2",
+  "pytest>=8.4.2",
 ]
 
 [project.optional-dependencies]
