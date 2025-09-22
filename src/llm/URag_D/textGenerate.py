@@ -13,7 +13,7 @@ api_key = os.getenv("GOOGLE_API_KEY")
 model = GoogleModel(
     'gemini-2.0-flash', 
     provider=GoogleProvider(
-        api_key=api_key, 
+        api_key=api_key
     )
 )
 worker1 = Agent(model)

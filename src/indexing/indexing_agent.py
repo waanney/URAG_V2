@@ -100,7 +100,7 @@ class Resp(BaseModel):
     status: Literal["ok", "error"]
     request_id: str
     data: Dict[str, Any] = Field(default_factory=dict)
-    message: Optional[str] = None   
+    message: Optional[str] = None
 # ======================= Config & Agent =======================
 
 @dataclass
@@ -112,6 +112,11 @@ class AgentConfig:
     default_metric: Metric = "COSINE"
     default_hnsw_params: Optional[Dict[str, Any]] = None  # Optional để không lỗi type
     normalize_l2_for_cosine: bool = True
+
+    # NEW: bật tách 2 collection
+    dual_collections: bool = True
+    doc_suffix: str = "__doc"
+    faq_suffix: str = "__faq"
 
     def __post_init__(self):
         if self.default_hnsw_params is None:
@@ -147,15 +152,34 @@ class IndexingAgent:
 
         try:
             if isinstance(req_obj, CreateCollectionReq):
-                col, dim = self._ensure_collection(
-                    collection=req_obj.collection,
-                    dim=req_obj.dim,
-                    metric=req_obj.metric_type,
-                    index_params=req_obj.index_params,
-                    shards=req_obj.shards_num,
-                    description=req_obj.description,
-                )
-                return self._ok(rid, {"collection": col.name, "dim": dim, "exists": True})
+                if self.cfg.dual_collections:
+                    col_doc, _ = self._ensure_doc_collection(
+                        base=req_obj.collection,
+                        dim=req_obj.dim,
+                        metric=req_obj.metric_type,
+                        index_params=req_obj.index_params,
+                        shards=req_obj.shards_num,
+                        description=req_obj.description,
+                    )
+                    col_faq, _ = self._ensure_faq_collection(
+                        base=req_obj.collection,
+                        dim=req_obj.dim,
+                        metric=req_obj.metric_type,
+                        index_params=req_obj.index_params,
+                        shards=req_obj.shards_num,
+                        description=req_obj.description,
+                    )
+                    return self._ok(rid, {"collections": [col_doc.name, col_faq.name], "dim": req_obj.dim, "exists": True})
+                else:
+                    col, dim = self._ensure_collection(
+                        collection=req_obj.collection,
+                        dim=req_obj.dim,
+                        metric=req_obj.metric_type,
+                        index_params=req_obj.index_params,
+                        shards=req_obj.shards_num,
+                        description=req_obj.description,
+                    )
+                    return self._ok(rid, {"collection": col.name, "dim": dim, "exists": True})
 
             if isinstance(req_obj, UpsertIndexReq):
                 return self._op_insert_like(req_obj, upsert=(req_obj.op == "upsert"), rid=rid)
@@ -177,7 +201,14 @@ class IndexingAgent:
         except Exception as e:
             return self._err(rid, str(e))
 
+    # ---------------- name helpers ----------------
+    def _colname(self, base: str, kind: Literal["doc","faq"]) -> str:
+        if not self.cfg.dual_collections:
+            return base
+        return f"{base}{self.cfg.doc_suffix if kind == 'doc' else self.cfg.faq_suffix}"
+
     # ------------- collection/index -------------
+    # (Legacy 1-collection schema – giữ để backward-compat nếu dual_collections=False)
     def _ensure_collection(
         self,
         collection: str,
@@ -219,6 +250,75 @@ class IndexingAgent:
         col.load()
         return col, dim
 
+    # NEW: schema riêng cho DOC
+    def _ensure_doc_collection(
+        self,
+        base: str,
+        dim: int,
+        metric: Metric,
+        index_params: Optional[IndexParams],
+        shards: int = 2,
+        description: Optional[str] = None,
+    ) -> Tuple[Collection, int]:
+        name = self._colname(base, "doc")
+        if utility.has_collection(name):
+            col = Collection(name)
+            return col, self._get_dim(col)
+
+        id_f   = FieldSchema("id",     DataType.VARCHAR, is_primary=True, max_length=128, auto_id=False)
+        vec_f  = FieldSchema("vector", DataType.FLOAT_VECTOR, dim=dim)
+        text_f = FieldSchema("text",   DataType.VARCHAR, max_length=65535)
+        src_f  = FieldSchema("source", DataType.VARCHAR, max_length=512)
+        meta_f = FieldSchema("metadata", DataType.VARCHAR, max_length=65535)
+        ts_f   = FieldSchema("ts",     DataType.INT64)
+
+        schema = CollectionSchema(
+            [id_f, vec_f, text_f, src_f, meta_f, ts_f],
+            description=description or "URA RAG - documents"
+        )
+        col = Collection(name, schema=schema, shards_num=shards)
+
+        ip = (index_params.model_dump() if isinstance(index_params, BaseModel)
+              else (index_params or {"index_type":"HNSW","metric_type":metric,"params": self.cfg.default_hnsw_params or {}}))
+        col.create_index(field_name="vector", index_params=ip)
+        col.load()
+        return col, dim
+
+    # NEW: schema riêng cho FAQ (embed question)
+    def _ensure_faq_collection(
+        self,
+        base: str,
+        dim: int,
+        metric: Metric,
+        index_params: Optional[IndexParams],
+        shards: int = 2,
+        description: Optional[str] = None,
+    ) -> Tuple[Collection, int]:
+        name = self._colname(base, "faq")
+        if utility.has_collection(name):
+            col = Collection(name)
+            return col, self._get_dim(col)
+
+        id_f  = FieldSchema("id",       DataType.VARCHAR, is_primary=True, max_length=128, auto_id=False)
+        vec_f = FieldSchema("vector",   DataType.FLOAT_VECTOR, dim=dim)
+        q_f   = FieldSchema("question", DataType.VARCHAR, max_length=65535)
+        a_f   = FieldSchema("answer",   DataType.VARCHAR, max_length=65535)
+        src_f = FieldSchema("source",   DataType.VARCHAR, max_length=512)
+        meta_f= FieldSchema("metadata", DataType.VARCHAR, max_length=65535)
+        ts_f  = FieldSchema("ts",       DataType.INT64)
+
+        schema = CollectionSchema(
+            [id_f, vec_f, q_f, a_f, src_f, meta_f, ts_f],
+            description=description or "URA RAG - FAQ (embed question)"
+        )
+        col = Collection(name, schema=schema, shards_num=shards)
+
+        ip = (index_params.model_dump() if isinstance(index_params, BaseModel)
+              else (index_params or {"index_type":"HNSW","metric_type":metric,"params": self.cfg.default_hnsw_params or {}}))
+        col.create_index(field_name="vector", index_params=ip)
+        col.load()
+        return col, dim
+
     def _get_dim(self, col: Collection) -> int:
         for f in col.schema.fields:
             if f.name == "vector":
@@ -245,41 +345,126 @@ class IndexingAgent:
                 it.text = it.text or ""
 
         dim = req.dim or len(items[0].vector)
-        col, _ = self._ensure_collection(
-            collection=req.collection, dim=dim, metric=req.metric_type,
-            index_params=req.index_params, shards=req.shards_num, description=req.description
-        )
 
-        # validate dim + normalize
-        for it in items:
-            if len(it.vector) != dim:
-                return self._err(rid, f"vector dim mismatch: expected {dim}, got {len(it.vector)} for id={it.id}")
-            if self.cfg.normalize_l2_for_cosine and req.metric_type == "COSINE":
-                self._l2_normalize_inplace(it.vector)
+        if not self.cfg.dual_collections:
+            # chế độ legacy 1 collection
+            col, _ = self._ensure_collection(
+                collection=req.collection, dim=dim, metric=req.metric_type,
+                index_params=req.index_params, shards=req.shards_num, description=req.description
+            )
+            # validate dim + normalize
+            for it in items:
+                if len(it.vector) != dim:
+                    return self._err(rid, f"vector dim mismatch: expected {dim}, got {len(it.vector)} for id={it.id}")
+                if self.cfg.normalize_l2_for_cosine and req.metric_type == "COSINE":
+                    self._l2_normalize_inplace(it.vector)
 
-        ids = [it.id for it in items]
-        try:
-            if upsert and ids:
-                expr = f"id in [{', '.join([repr(x) for x in ids])}]"
-                col.delete(expr)
-        except Exception as e:
-            # Không fail toàn bộ batch vì delete lỗi
-            pass
+            ids = [it.id for it in items]
+            try:
+                if upsert and ids:
+                    expr = f"id in [{', '.join([repr(x) for x in ids])}]"
+                    col.delete(expr)
+            except Exception:
+                pass
 
-        rows = self._to_columns(items)
-        try:
-            col.insert(rows)
-            if req.build_index and not col.indexes:
-                # (rare) index chưa tồn tại
-                ip = (req.index_params.model_dump() if isinstance(req.index_params, BaseModel)
-                      else (req.index_params or {"index_type":"HNSW","metric_type":req.metric_type,"params": self.cfg.default_hnsw_params or {}}))
-                col.create_index("vector", ip)
-            col.flush()
-            col.load()
-        except Exception as e:
-            return self._err(rid, f"insert failed: {e}")
+            rows = self._to_columns(items)
+            try:
+                col.insert(rows)
+                if req.build_index and not col.indexes:
+                    ip = (req.index_params.model_dump() if isinstance(req.index_params, BaseModel)
+                          else (req.index_params or {"index_type":"HNSW","metric_type":req.metric_type,"params": self.cfg.default_hnsw_params or {}}))
+                    col.create_index("vector", ip)
+                col.flush()
+                col.load()
+            except Exception as e:
+                return self._err(rid, f"insert failed: {e}")
 
-        return self._ok(rid, {"collection": req.collection, "acknowledged": True, "inserted": len(items), "ids": ids})
+            return self._ok(rid, {"collection": req.collection, "acknowledged": True, "inserted": len(items), "ids": ids})
+
+        # chế độ 2 collection: tách nhóm
+        docs = [it for it in items if it.type == "doc"]
+        faqs = [it for it in items if it.type == "faq"]
+
+        inserted = 0
+        ack_ids: List[str] = []
+
+        # DOC branch
+        if docs:
+            col_doc, _ = self._ensure_doc_collection(
+                base=req.collection, dim=dim, metric=req.metric_type,
+                index_params=req.index_params, shards=req.shards_num, description=req.description
+            )
+            for it in docs:
+                if len(it.vector) != dim:
+                    return self._err(rid, f"vector dim mismatch (doc): expected {dim}, got {len(it.vector)} for id={it.id}")
+                if self.cfg.normalize_l2_for_cosine and req.metric_type == "COSINE":
+                    self._l2_normalize_inplace(it.vector)
+
+            ids = [it.id for it in docs]
+            try:
+                if upsert and ids:
+                    expr = f"id in [{', '.join([repr(x) for x in ids])}]"
+                    col_doc.delete(expr)
+            except Exception:
+                pass
+
+            rows_doc = [
+                [it.id for it in docs],
+                [[float(x) for x in it.vector] for it in docs],
+                [it.text or "" for it in docs],
+                [it.source or "doc" for it in docs],
+                [json.dumps(it.metadata or {}, ensure_ascii=False) for it in docs],
+                [int(it.ts or 0) for it in docs],
+            ]
+            try:
+                col_doc.insert(rows_doc)
+                col_doc.flush()
+                col_doc.load()
+            except Exception as e:
+                return self._err(rid, f"insert(doc) failed: {e}")
+            inserted += len(docs); ack_ids += ids
+
+        # FAQ branch
+        if faqs:
+            col_faq, _ = self._ensure_faq_collection(
+                base=req.collection, dim=dim, metric=req.metric_type,
+                index_params=req.index_params, shards=req.shards_num, description=req.description
+            )
+            for it in faqs:
+                if len(it.vector) != dim:
+                    return self._err(rid, f"vector dim mismatch (faq): expected {dim}, got {len(it.vector)} for id={it.id}")
+                if self.cfg.normalize_l2_for_cosine and req.metric_type == "COSINE":
+                    self._l2_normalize_inplace(it.vector)
+
+            ids = [it.id for it in faqs]
+            try:
+                if upsert and ids:
+                    expr = f"id in [{', '.join([repr(x) for x in ids])}]"
+                    col_faq.delete(expr)
+            except Exception:
+                pass
+
+            rows_faq = [
+                [it.id for it in faqs],
+                [[float(x) for x in it.vector] for it in faqs],
+                [it.question or "" for it in faqs],
+                [it.answer or "" for it in faqs],
+                [it.source or "faq" for it in faqs],
+                [json.dumps(it.metadata or {}, ensure_ascii=False) for it in faqs],
+                [int(it.ts or 0) for it in faqs],
+            ]
+            try:
+                col_faq.insert(rows_faq)
+                col_faq.flush()
+                col_faq.load()
+            except Exception as e:
+                return self._err(rid, f"insert(faq) failed: {e}")
+            inserted += len(faqs); ack_ids += ids
+
+        return self._ok(rid, {
+            "collection": [self._colname(req.collection,"doc"), self._colname(req.collection,"faq")],
+            "acknowledged": True, "inserted": inserted, "ids": ack_ids
+        })
 
     def _op_delete(self, req: DeleteReq, rid: str) -> Dict[str, Any]:
         if not utility.has_collection(req.collection):
@@ -356,6 +541,7 @@ class IndexingAgent:
         return self._ok(rid, {"collection": req.collection, "num_entities": col.num_entities})
 
     # ------------- utils -------------
+    # legacy (dùng cho 1-collection)
     def _to_columns(self, items: List[Item]):
         ids, types, vecs, texts, qs, ans, srcs, metas, tss = [], [], [], [], [], [], [], [], []
         for it in items:
@@ -419,4 +605,3 @@ class IndexingAgent:
 
     def _err(self, rid: str, msg: str) -> Dict[str, Any]:
         return Resp(status="error", request_id=rid, message=msg).model_dump()
-

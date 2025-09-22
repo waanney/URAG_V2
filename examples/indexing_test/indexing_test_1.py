@@ -1,71 +1,84 @@
-# examples/indexing_test_3.py
+# examples/indexing_test_dual_collections.py
+"""
+Run directly (no main()) to test IndexingAgent with TWO separate Milvus collections:
+  - <base>__doc  (stores docs)
+  - <base>__faq  (stores FAQs)
+Requires a running Milvus (docker compose up -d) and pymilvus installed.
+"""
+
 import time, random, string
 from pymilvus import utility
-from src.indexing.indexing_agent import IndexingAgent
+from src.indexing.indexing_agent import IndexingAgent, CreateCollectionReq
 
-def r(n=6): return ''.join(random.choices(string.ascii_lowercase+string.digits, k=n))
+def rand_suffix(n=6):
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=n))
 
-agent = IndexingAgent()
-coll = f"ura_rag_test3_{int(time.time())}_{r()}"
+# --- Setup ---
+agent = IndexingAgent()  # dual_collections should be enabled inside the agent
+base = f"ura_rag_dual_{int(time.time())}_{rand_suffix()}"
+coll_doc = f"{base}__doc"
+coll_faq = f"{base}__faq"
 
 try:
-    # 1) create
-    agent.process_and_print({
-        "op":"create_collection", "collection":coll, "dim":4, "metric_type":"COSINE"
-    })
+    # 1) Create base -> agent should create <base>__doc and <base>__faq
+    print("== CREATE TWO COLLECTIONS ==")
+    agent.process_and_print(CreateCollectionReq(
+        collection=base, dim=4, metric_type="COSINE"
+    ))
 
-    # 2) index: 2 doc + 2 faq
+    assert utility.has_collection(coll_doc), f"missing {coll_doc}"
+    assert utility.has_collection(coll_faq), f"missing {coll_faq}"
+
+    # 2) Upsert mixed items (agent routes by type)
+    print("\n== UPSERT MIXED (DOC + FAQ) ==")
     agent.process_and_print({
-        "op":"index", "collection":coll, "metric_type":"COSINE",
-        "items":[
-            # DOC
-            {"id":"doc#A","type":"doc","vector":[0.1,0.2,0.3,0.4], "text":"tài liệu về Milvus compose"},
-            {"id":"doc#B","type":"doc","vector":[0.4,0.2,0.1,0.3], "text":"hướng dẫn cài đặt và cấu hình"},
-            # FAQ (vector nên là embed của question)
-            {"id":"faq#1","type":"faq","vector":[0.2,0.1,0.4,0.3],
-             "question":"Milvus chạy sao?", "answer":"Dùng Docker compose standalone."},
-            {"id":"faq#2","type":"faq","vector":[0.15,0.25,0.35,0.25],
-             "question":"Làm sao xóa dữ liệu trong Milvus?",
-             "answer":"Dùng col.delete(expr) rồi compaction tự động."},
+        "op": "index",
+        "collection": base,              # pass BASE; agent routes to __doc / __faq
+        "metric_type": "COSINE",
+        "items": [
+            # DOCs
+            {"id":"doc#A","type":"doc","vector":[0.3,0.1,0.2,0.4],"text":"đoạn tài liệu A","source":"doc_src"},
+            {"id":"doc#B","type":"doc","vector":[0.4,0.2,0.1,0.3],"text":"đoạn tài liệu B","source":"doc_src"},
+            # FAQs (embed QUESTION)
+            {"id":"faq#1","type":"faq","vector":[0.29,0.11,0.19,0.41],
+             "question":"BK có bao nhiêu cơ sở?","answer":"HCMUT có 2 cơ sở.","source":"faq_src"},
+            {"id":"faq#2","type":"faq","vector":[0.42,0.19,0.11,0.28],
+             "question":"Học phí khoảng bao nhiêu?","answer":"~30–40 triệu/năm tuỳ chương trình.","source":"faq_src"},
         ]
     })
 
-    # 3) search trong FAQ
-    print("\n=== SEARCH FAQ ===")
-    agent.process_and_print({
-        "op":"search", "collection":coll,
-        "search_vector":[0.2,0.1,0.4,0.3],      # giống faq#1
-        "top_k":3, "metric_type":"COSINE",
-        "filter": 'type == "faq"',
-        "output_fields":["id","type","question","answer"]
-    })
+    # 3) Search DOC collection
+    print("\n== SEARCH DOC COLLECTION ==")
+    print(agent.process_to_json({
+        "op": "search",
+        "collection": coll_doc,          # search directly on __doc
+        "search_vector": [0.3,0.1,0.2,0.4],
+        "top_k": 2,
+        "metric_type": "COSINE",
+        "output_fields": ["id","type","text","source","metadata"]
+    }, pretty=True))
 
-    # 4) search trong DOC
-    print("\n=== SEARCH DOC ===")
-    agent.process_and_print({
-        "op":"search", "collection":coll,
-        "search_vector":[0.1,0.2,0.3,0.4],      # giống doc#A
-        "top_k":3, "metric_type":"COSINE",
-        "filter": 'type == "doc"',
-        "output_fields":["id","type","text"]
-    })
+    # 4) Search FAQ collection
+    print("\n== SEARCH FAQ COLLECTION ==")
+    print(agent.process_to_json({
+        "op": "search",
+        "collection": coll_faq,          # search directly on __faq
+        "search_vector": [0.29,0.11,0.19,0.41],
+        "top_k": 2,
+        "metric_type": "COSINE",
+        "output_fields": ["id","type","question","answer","source","metadata"]
+    }, pretty=True))
 
-    # 5) (tuỳ chọn) xoá 1 FAQ rồi search lại
-    print("\n=== DELETE faq#1 & SEARCH FAQ AGAIN ===")
-    agent.process_and_print({"op":"delete", "collection":coll, "ids":["faq#1"]})
-    agent.process_and_print({
-        "op":"search", "collection":coll,
-        "search_vector":[0.2,0.1,0.4,0.3],
-        "top_k":5, "metric_type":"COSINE",
-        "filter": 'type == "faq"',
-        "output_fields":["id","type","question"]
-    })
+    # 5) Stats
+    print("\n== STATS DOC ==")
+    agent.process_and_print({"op":"stats", "collection": coll_doc})
 
-    # 6) stats
-    print("\n=== STATS ===")
-    agent.process_and_print({"op":"stats", "collection":coll})
+    print("\n== STATS FAQ ==")
+    agent.process_and_print({"op":"stats", "collection": coll_faq})
 
 finally:
-    if utility.has_collection(coll):
-        utility.drop_collection(coll)
-        print(f"[cleanup] dropped collection {coll}")
+    # Cleanup
+    for name in (coll_doc, coll_faq):
+        if utility.has_collection(name):
+            utility.drop_collection(name)
+            print(f"[cleanup] dropped collection {name}")
