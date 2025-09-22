@@ -11,11 +11,11 @@ import re
 # Setup
 # ========================
 load_dotenv()
-API_KEY = os.getenv("GEMINI_API_KEY")
+API_KEY = os.getenv("GOOGLE_API_KEY")
 MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-2.0-flash")
 
 if not API_KEY:
-    raise ValueError("GEMINI_API_KEY must be set in .env")
+    raise ValueError("GOOGLE_API_KEY must be set in .env")
 
 client = genai.Client(api_key=API_KEY)
 

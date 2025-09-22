@@ -10,13 +10,15 @@ load_dotenv()
 
 api_key = os.getenv("GOOGLE_API_KEY")
 
+if not api_key:
+    raise ValueError("GOOGLE_API_KEY is not set in the environment variables.")
+
 model = GoogleModel(
     'gemini-2.0-flash', 
     provider=GoogleProvider(
         api_key=api_key
     )
 )
-worker1 = Agent(model)
 
 @dataclass
 class MyDeps:
@@ -90,11 +92,11 @@ worker2 = Agent(
 )
 
 @worker1.system_prompt
-def get_prompt1(ctx: RunContext):
+def get_prompt1(ctx: RunContext[MyDeps]):
     return build_prompt(ctx)
 
 @worker2.system_prompt
-def get_prompt2(ctx: RunContext):
+def get_prompt2(ctx: RunContext[MyDeps]):
     return build_prompt(ctx)
 
 def get_data_from_json_file(file_name: str) -> dict:
@@ -103,7 +105,7 @@ def get_data_from_json_file(file_name: str) -> dict:
 
     return data
 
-def parsed(json_output: str) -> str:
+def parsed(json_output: str) -> None:
     OutputFile = "src/llm/URag_D/received_output.json"
     data = json.loads(json_output)
     if  os.path.exists(OutputFile):

@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple, Union, Annotated, 
 from dataclasses import dataclass
 import os, json, math, time
 
-from pydantic import BaseModel, Field, field_validator, ValidationError, TypeAdapter
+from pydantic import BaseModel, Field, field_validator, TypeAdapter
 from pymilvus import (
     connections, FieldSchema, CollectionSchema, DataType,
     Collection, utility
@@ -80,7 +80,8 @@ class SearchReq(BaseReq):
     metric_type: Metric = "COSINE"
     filter: Optional[str] = None
     search_params: Optional[Dict[str, Any]] = None
-    output_fields: List[str] = Field(default_factory=lambda: ["id","type","text","question","answer","source","metadata"])
+    # CHANGED: cho phép None, sẽ tự chọn safe fields theo schema collection
+    output_fields: Optional[List[str]] = None
 
 class StatsReq(BaseReq):
     op: Literal["stats"] = "stats"
@@ -507,17 +508,33 @@ class IndexingAgent:
         if self.cfg.normalize_l2_for_cosine and req.metric_type == "COSINE":
             self._l2_normalize_inplace(qv)
 
+        # --- chọn output_fields an toàn (khi req.output_fields is None hoặc có field lạ) ---
+        available = {f.name for f in col.schema.fields}
+        if req.output_fields:
+            safe_out_fields = [f for f in req.output_fields if f in available]
+        else:
+            # Fallback mặc định theo collection
+            if "question" in available:  # FAQ collection
+                safe_out_fields = [x for x in ["id","question","answer","source","metadata"] if x in available]
+            else:                        # DOC collection
+                safe_out_fields = [x for x in ["id","text","source","metadata"] if x in available]
+
+        # Nếu người dùng truyền field không tồn tại hết → vẫn đảm bảo có vài field để trả
+        if not safe_out_fields:
+            safe_out_fields = [f for f in ["id","text","question","answer","source","metadata"] if f in available] or ["id"]
+        # -----------------------------------------------------------------------------------
+
         # Pylance đôi khi annotate search->SearchFuture; ép Any để index [0]
         results: Any = col.search(
             data=[qv], anns_field="vector", param=sp, limit=req.top_k,
-            expr=req.filter, output_fields=req.output_fields, consistency_level="Strong"
+            expr=req.filter, output_fields=safe_out_fields, consistency_level="Strong"
         )
 
         hits_list = results[0]  # type: ignore[index]
         out: List[Dict[str, Any]] = []
         for h in hits_list:
             row: Dict[str, Any] = {"id": h.entity.get("id"), "score": float(h.distance)}
-            for f in req.output_fields:
+            for f in safe_out_fields:
                 try:
                     row[f] = h.entity.get(f)
                 except Exception:
@@ -531,7 +548,7 @@ class IndexingAgent:
 
         return self._ok(rid, {
             "collection": req.collection, "top_k": req.top_k,
-            "results": out, "search_params_used": {"index_type": idx_type, **sp}
+            "results": out, "search_params_used": {"index_type": idx_type, **sp, "output_fields": safe_out_fields}
         })
 
     def _op_stats(self, req: StatsReq, rid: str) -> Dict[str, Any]:

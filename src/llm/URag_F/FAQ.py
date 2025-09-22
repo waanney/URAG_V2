@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 import ujson
 import numpy as np
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from sentence_transformers import SentenceTransformer
 from transformers import pipeline
 import nltk
@@ -26,7 +26,7 @@ class Provenance(BaseModel):
     doc_path: Optional[str] = None
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
-    @validator("source_type")
+    @field_validator("source_type")
     def check_source_type_non_empty(cls, v):
         if not v.strip():
             raise ValueError("source_type cannot be empty")
@@ -39,7 +39,7 @@ class FAQItem(BaseModel):
     canonical_id: str
     provenance: Provenance
 
-    @validator("question", "answer")
+    @field_validator("question", "answer")
     def check_non_empty(cls, v):
         if not v.strip():
             raise ValueError("Field cannot be empty")
