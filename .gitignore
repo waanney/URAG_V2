@@ -169,3 +169,32 @@ cython_debug/
 
 # macOS system files
 .DS_Store
+
+# Docker Compose junk (bind-mount data) ------- CULEY24 ADDED
+# Milvus
+/milvus_data/
+**/milvus_data/
+
+# Databases / services   ------- CULEY24 ADDED
+/postgres_data/
+/mysql_data/
+/mongo_data/
+/redis_data/
+/es_data/
+/opensearch_data/
+/minio_data/
+/rabbitmq_data/
+/kafka_data/
+/vector_data/
+/prometheus_data/
+/grafana_data/
+/vault_data/
+/nginx_logs/
+/logs/
+
+# MILVUS VOLUME GITIGNORE  ------- CULEY24 ADDED
+/volumes/
+/data/
+
+# NOTES -------- CULEY24 ADDED
+culey24.md
