@@ -1,7 +1,0 @@
-Linked List is basically chains of nodes where each node contains information such as data and a pointer to the next node in the chain. It is a popular data structure with a wide range of real-world applications. Unlike Arrays, Linked List elements are not stored at a contiguous location. In the linked list there is a head pointer, which points to the first element of the linked list, and if the list is empty then it simply points to null or nothing.
-In this article, we will provide a complete introduction of Linked List, which will help you tackle any problem based on Linked List.
-Basic Terminologies of Linked List
-Head: The Head of a linked list is a pointer to the first node or reference of the first node of linked list. This pointer marks the beginning of the linked list.
-Node: Linked List consists of a series of nodes where each node has two parts: data and next pointer.
-Data: Data is the part of node which stores the information in the linked list.
-Next pointer: Next pointer is the part of the node which points to the next node of the linked list.

@@ -4,6 +4,7 @@ import os
 import json
 from dotenv import load_dotenv
 from google import genai
+import re
 
 # ========================
 # Setup
@@ -32,32 +33,40 @@ class LLMResponse(BaseModel):
 # ========================
 def build_prompt(chunk: Chunk) -> str:
     return f"""
-# TASK: Vietnamese Quick Description Generation 
+# TASK: Vietnamese Quick Description Generation with Hybrid Semantic Chunking
 
 ## ROLE
-You are an expert in crafting concise, single-sentence descriptions that capture the main content of a text chunk.
+You are an expert in crafting concise, single-sentence descriptions that capture the main content of a text chunk, and in adjusting semantic chunking when necessary.
+
 ---------------------
 ## GOAL
-Split the provided input text into multiple semantic chunks. Each chunk should represent a coherent and self-contained idea or topic. Preserve the original wording inside each chunk without rewriting or summarizing.
+Your task is:
+1. Analyze the provided rewritten text chunk.
+2. If the chunk already makes sense semantically, generate a **single-sentence title/quick description**.
+3. If the chunk still contains multiple distinct ideas, you are allowed to **mentally split it into smaller sub-chunks** and generate **one description per sub-chunk**. Each description must be a separate JSON object inside the returned array.
+
 ---------------------
 ## GUIDELINES
 1. **Core Focus:**
-   * Analyze the rewritten text chunk to identify its key message or theme.
-   * Do not repeat the text verbatim; instead, paraphrase into a clearer summary.
+   * Identify the main idea(s) of the chunk or its sub-parts.
+   * If splitting, ensure each description corresponds to one coherent semantic unit.
 2. **Language:**
    * Input and output are in Vietnamese.
    * Do not mix in English words unless they appear in the original text.
 3. **Conciseness:**
-   * The description must be exactly **one grammatically complete sentence**, ending with a period.
+   * Each description must be exactly **one grammatically complete sentence**, ending with a period.
 4. **Output Format:**
-Always return exactly one JSON object, wrapped inside a JSON array, like this:
+   * Return the final output in strict JSON format with a single key "title_or_quick_description".
+   * Always return exactly one JSON array.  
+   Example (for multiple sub-chunks):
 [
-  {{"title_or_quick_description": "..."}},
+  {{"title_or_quick_description": "..."}}
 ]
 
 ## Đoạn văn cần tóm tắt:
 \"\"\"{chunk.text}\"\"\"
 """.strip()
+
 
 
 # ========================
@@ -118,9 +127,57 @@ def process_chunk(chunk: Chunk) -> List[str]:
 # ========================
 # Semantic Chunking
 # ========================
-def semantic_chunk(text: str) -> List[Chunk]:
-    paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
-    return [Chunk(text=p) for p in paragraphs]
+def semantic_chunk(text: str, max_chunk_size: int = 800, overlap: int = 100) -> List[Chunk]:
+    """
+    Hybrid semantic chunking:
+    1. Split text into paragraphs (\n\n).
+    2. If paragraph too long -> split by sentence.
+    3. If still too long -> sliding window with overlap.
+    """
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    chunks = []
+
+    for para in paragraphs:
+        # Chuẩn hóa whitespace
+        para = re.sub(r'\s+', ' ', para).strip()
+
+        if len(para) <= max_chunk_size:
+            chunks.append(Chunk(text=para))
+            continue
+
+        # Step 2: split into sentences
+        sentences = re.split(r'(?<=[\.!?])\s+', para)
+        current_chunk = ""
+
+        for sentence in sentences:
+            if not sentence.strip():
+                continue
+
+            if len(current_chunk) + len(sentence) + 1 > max_chunk_size:
+                chunks.append(Chunk(text=current_chunk.strip()))
+                current_chunk = sentence
+            else:
+                current_chunk += " " + sentence if current_chunk else sentence
+
+        if current_chunk:
+            chunks.append(Chunk(text=current_chunk.strip()))
+
+        # Step 3: if any chunk still too long, break into sliding windows
+        final_chunks = []
+        for c in chunks:
+            if len(c.text) > max_chunk_size:
+                text = c.text
+                start = 0
+                while start < len(text):
+                    end = min(start + max_chunk_size, len(text))
+                    window = text[start:end]
+                    final_chunks.append(Chunk(text=window.strip()))
+                    start += max_chunk_size - overlap
+            else:
+                final_chunks.append(c)
+        chunks = final_chunks
+
+    return chunks
 
 def semantic_chunker_pipeline(text: str) -> List[str]:
     chunks = semantic_chunk(text)
