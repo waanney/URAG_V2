@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 
 dependencies = [
+  "nltk>=3.9.1",
   "pydantic-ai-slim[google,mistral]",
   "dotenv>=0.9.9",
   "google>=3.0.0",
@@ -17,6 +18,7 @@ dependencies = [
   "python-dotenv>=1.1.1",
   "pymilvus>=2.6.2",
   "pytest>=8.4.2",
+  "sentence-transformers>=5.1.0",
 ]
 
 [project.optional-dependencies]
@@ -67,3 +69,9 @@ target-version = ["py310"]
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+
+[tool.pyright]
+include = ["src", "examples", "tests"]
+extraPaths = ["src", "src/URag_F"]
+venv = ".venv"
+venvPath = "."

@@ -1,4 +1,6 @@
 {
-  "venv":".venv",
-  "venvPath":"."
+  "venv": ".venv",
+  "venvPath": ".",
+  "include": ["src", "examples", "tests"],
+  "extraPaths": ["src", "src/llm", "src/llm/URag_F"]
 }
