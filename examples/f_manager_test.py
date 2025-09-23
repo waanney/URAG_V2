@@ -5,7 +5,7 @@ from pymilvus import utility
 
 from src.managers.urag_f_manager import FManager, FManagerConfig, AugmentedChunk, IFaqGenerator, IEmbedder
 from src.indexing.indexing_agent import IndexingAgent
-from src.llm.embedding_agent import EmbedderAgent, EmbConfig  # ✅ đúng tên lớp
+from src.embedding.embedding_agent import EmbedderAgent, EmbConfig  
 
 # ===== Adapters =====
 class EmbedderAdapter(IEmbedder):

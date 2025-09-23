@@ -345,18 +345,19 @@ class IndexingAgent:
                 it.answer = it.answer or ""
                 it.text = it.text or ""
 
-        dim = req.dim or len(items[0].vector)
+        # dim “gợi ý” từ request/lô hàng — dùng khi TẠO collection mới
+        requested_dim = req.dim or len(items[0].vector)
 
         if not self.cfg.dual_collections:
-            # chế độ legacy 1 collection
-            col, _ = self._ensure_collection(
-                collection=req.collection, dim=dim, metric=req.metric_type,
+            # ----- legacy: 1 collection -----
+            col, actual_dim = self._ensure_collection(
+                collection=req.collection, dim=requested_dim, metric=req.metric_type,
                 index_params=req.index_params, shards=req.shards_num, description=req.description
             )
-            # validate dim + normalize
+            # validate theo actual_dim của collection
             for it in items:
-                if len(it.vector) != dim:
-                    return self._err(rid, f"vector dim mismatch: expected {dim}, got {len(it.vector)} for id={it.id}")
+                if len(it.vector) != actual_dim:
+                    return self._err(rid, f"vector dim mismatch: expected {actual_dim}, got {len(it.vector)} for id={it.id}")
                 if self.cfg.normalize_l2_for_cosine and req.metric_type == "COSINE":
                     self._l2_normalize_inplace(it.vector)
 
@@ -373,7 +374,7 @@ class IndexingAgent:
                 col.insert(rows)
                 if req.build_index and not col.indexes:
                     ip = (req.index_params.model_dump() if isinstance(req.index_params, BaseModel)
-                          else (req.index_params or {"index_type":"HNSW","metric_type":req.metric_type,"params": self.cfg.default_hnsw_params or {}}))
+                        else (req.index_params or {"index_type":"HNSW","metric_type":req.metric_type,"params": self.cfg.default_hnsw_params or {}}))
                     col.create_index("vector", ip)
                 col.flush()
                 col.load()
@@ -382,7 +383,7 @@ class IndexingAgent:
 
             return self._ok(rid, {"collection": req.collection, "acknowledged": True, "inserted": len(items), "ids": ids})
 
-        # chế độ 2 collection: tách nhóm
+        # ----- dual collections: tách doc/faq -----
         docs = [it for it in items if it.type == "doc"]
         faqs = [it for it in items if it.type == "faq"]
 
@@ -391,13 +392,13 @@ class IndexingAgent:
 
         # DOC branch
         if docs:
-            col_doc, _ = self._ensure_doc_collection(
-                base=req.collection, dim=dim, metric=req.metric_type,
+            col_doc, actual_dim_doc = self._ensure_doc_collection(
+                base=req.collection, dim=requested_dim, metric=req.metric_type,
                 index_params=req.index_params, shards=req.shards_num, description=req.description
             )
             for it in docs:
-                if len(it.vector) != dim:
-                    return self._err(rid, f"vector dim mismatch (doc): expected {dim}, got {len(it.vector)} for id={it.id}")
+                if len(it.vector) != actual_dim_doc:
+                    return self._err(rid, f"vector dim mismatch (doc): expected {actual_dim_doc}, got {len(it.vector)} for id={it.id}")
                 if self.cfg.normalize_l2_for_cosine and req.metric_type == "COSINE":
                     self._l2_normalize_inplace(it.vector)
 
@@ -427,13 +428,13 @@ class IndexingAgent:
 
         # FAQ branch
         if faqs:
-            col_faq, _ = self._ensure_faq_collection(
-                base=req.collection, dim=dim, metric=req.metric_type,
+            col_faq, actual_dim_faq = self._ensure_faq_collection(
+                base=req.collection, dim=requested_dim, metric=req.metric_type,
                 index_params=req.index_params, shards=req.shards_num, description=req.description
             )
             for it in faqs:
-                if len(it.vector) != dim:
-                    return self._err(rid, f"vector dim mismatch (faq): expected {dim}, got {len(it.vector)} for id={it.id}")
+                if len(it.vector) != actual_dim_faq:
+                    return self._err(rid, f"vector dim mismatch (faq): expected {actual_dim_faq}, got {len(it.vector)} for id={it.id}")
                 if self.cfg.normalize_l2_for_cosine and req.metric_type == "COSINE":
                     self._l2_normalize_inplace(it.vector)
 
@@ -466,6 +467,7 @@ class IndexingAgent:
             "collection": [self._colname(req.collection,"doc"), self._colname(req.collection,"faq")],
             "acknowledged": True, "inserted": inserted, "ids": ack_ids
         })
+
 
     def _op_delete(self, req: DeleteReq, rid: str) -> Dict[str, Any]:
         if not utility.has_collection(req.collection):

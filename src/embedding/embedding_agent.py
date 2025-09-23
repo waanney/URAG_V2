@@ -1,4 +1,4 @@
-# src/llm/embedding_agent.py
+# src/embedding/embedding_agent.py
 from __future__ import annotations
 from typing import Any, Dict, List, Literal, Optional, Tuple
 from dataclasses import dataclass
@@ -7,25 +7,40 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 
 Metric = Literal["COSINE", "IP", "L2"]
+Language = Literal["auto", "vi", "default"]  # "auto" dự phòng cho tương lai; hiện chọn cố định theo config
 
 @dataclass
 class EmbConfig:
+    # Model mặc định (đa ngôn ngữ, dim=384)
     model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
-    # 👇 tránh Optional[int] để không bị “int | None”
+    # Model tiếng Việt chuyên dụng
+    vi_model_name: str = "dangvantuan/vietnamese-embedding"
+
+    # Chọn ngôn ngữ: "vi" -> dùng vi_model_name, "default" -> dùng model_name
+    # (Không auto-switch trong runtime để tránh lệch dimension của Milvus collection)
+    language: Language = "default"
+
     batch_size: int = 64
-    # 'cpu' | 'cuda' hoặc None (nếu None thì để SentenceTransformer tự chọn)
-    device: Optional[str] = None
+    device: Optional[str] = None  # 'cpu' | 'cuda' | None
     normalize_for_cosine: bool = True
     metric: Metric = "COSINE"
 
 class EmbedderAgent:
     def __init__(self, cfg: EmbConfig):
         self.cfg = cfg
-        # Tránh truyền device=None nếu không cần
+
+        # Chốt model theo language ngay từ đầu để đảm bảo dimension nhất quán
+        chosen_model = (
+            self.cfg.vi_model_name
+            if self.cfg.language == "vi"
+            else self.cfg.model_name
+        )
+
         if self.cfg.device is None:
-            self.model = SentenceTransformer(self.cfg.model_name)
+            self.model = SentenceTransformer(chosen_model)
         else:
-            self.model = SentenceTransformer(self.cfg.model_name, device=self.cfg.device)
+            self.model = SentenceTransformer(chosen_model, device=self.cfg.device)
+
         # cache dim
         self._dim: Optional[int] = None
 
@@ -41,11 +56,10 @@ class EmbedderAgent:
             texts,
             batch_size=self.cfg.batch_size,
             convert_to_numpy=True,
-            normalize_embeddings=False,  # ta sẽ tự normalize nếu cần
+            normalize_embeddings=False,  # tự normalize nếu cần
             show_progress_bar=False,
         ).astype("float32")
         if self.cfg.normalize_for_cosine and self.cfg.metric == "COSINE":
-            # L2 normalize in-place (tránh chia 0)
             norms = np.linalg.norm(vecs, axis=1, keepdims=True)
             norms[norms == 0.0] = 1.0
             vecs /= norms
@@ -72,12 +86,10 @@ class EmbedderAgent:
                 text = it
                 meta: Dict[str, Any] = {}
             else:
-                # it là dict
                 text = str(it.get("text", "")).strip()
                 meta = {k: v for k, v in it.items() if k != "text"}
 
             if not text:
-                # bỏ qua rỗng
                 continue
 
             texts.append(text)
@@ -94,7 +106,6 @@ class EmbedderAgent:
                 "type": "doc",
                 "text": text,
                 "vector": vecs[i].tolist(),
-                # ✅ lấy từng key, không tuple-index
                 "source": meta.get("source", default_source),
                 "metadata": meta.get("metadata", {}),
                 "ts": int(meta.get("ts", ts or 0)),
@@ -117,7 +128,6 @@ class EmbedderAgent:
         metas: List[Tuple[str, Dict[str, Any]]] = []  # (answer, meta)
 
         for it in faqs:
-            # đảm bảo là dict
             if not isinstance(it, dict):
                 continue
             q = str(it.get("question", "")).strip()

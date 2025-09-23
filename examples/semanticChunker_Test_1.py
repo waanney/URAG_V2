@@ -3,7 +3,7 @@ import os
 import json
 
 # Import semanticChunker from src
-from src.llm.URag_D import semanticChunker as sc
+from legacy_code import semanticChunker_llm as sc
 
 
 class TestSemanticChunker(unittest.TestCase):

@@ -19,6 +19,9 @@ dependencies = [
   "pymilvus>=2.6.2",
   "pytest>=8.4.2",
   "sentence-transformers>=5.1.0",
+  "langchain-text-splitters>=0.3.11",
+  "langchain-community>=0.3.29",
+  "langchain-experimental>=0.3.4",
 ]
 
 [project.optional-dependencies]
