@@ -1,24 +1,30 @@
 # src/llm/URag_D/document_loader.py
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import List, Dict, Any, Optional, Iterable
+from typing import List, Dict, Any, Optional
 from pathlib import Path
 import json
-import pandas as pd
 
 # LangChain Document type (compatible across versions)
 try:
     from langchain_core.documents import Document  # LC >= 0.2
 except Exception:  # pragma: no cover
-    from langchain.schema import Document  # older LC
+    from langchain.schema import Document  # Older LC
 
 # Individual loaders
 from langchain_community.document_loaders import (
     PyPDFLoader,
     Docx2txtLoader,
     TextLoader,
-    CSVLoader, # MỚI THÊM
 )
+
+# CSV loader (optional across versions)
+_HAS_CSV = True
+try:
+    from langchain_community.document_loaders import CSVLoader
+except Exception:  # pragma: no cover
+    CSVLoader = None  # type: ignore[assignment]
+    _HAS_CSV = False
 
 # Optional Unstructured
 try:  # pragma: no cover
@@ -35,10 +41,11 @@ class DocLoaderConfig:
     docx_glob: str = "**/*.docx"
     txt_glob:  str = "**/*.txt"
     md_glob:   str = "**/*.md"
-    csv_glob: str = "**/*.csv"  # MỚI THÊM
+    csv_glob:  str = "**/*.csv"
 
-    # Cấu hình cho CSV Loader
-    csv_source_column: Optional[str] = None # MỚI THÊM: Tên cột làm metadata 'source'
+    # CSV options (for CSVLoader)
+    csv_source_column: Optional[str] = None
+    csv_delimiter: str = ","  # used via csv_args for better compatibility
 
     # Optional: load everything else via Unstructured (if installed)
     use_unstructured: bool = False
@@ -68,7 +75,7 @@ class DocLoaderLC:
         docs += self._load_by_glob(root, self.cfg.docx_glob, loader="docx")
         docs += self._load_by_glob(root, self.cfg.txt_glob, loader="txt")
         docs += self._load_by_glob(root, self.cfg.md_glob, loader="md")
-        docs += self._load_by_glob(root, self.cfg.csv_glob, loader="csv") # MỚI THÊM
+        docs += self._load_by_glob(root, self.cfg.csv_glob, loader="csv")
 
         if self.cfg.use_unstructured and self.cfg.other_glob and HAS_UNSTRUCTURED:
             docs += self._load_by_glob(root, self.cfg.other_glob, loader="unstructured")
@@ -94,12 +101,17 @@ class DocLoaderLC:
                     ld = Docx2txtLoader(str(p))
                 elif loader in ("txt", "md"):
                     ld = TextLoader(str(p), autodetect_encoding=self.cfg.autodetect_encoding)
-                elif loader == "csv": # MỚI THÊM
-                    ld = CSVLoader(
-                        file_path=str(p),
-                        source_column=self.cfg.csv_source_column,
-                        encoding="utf-8"
-                    )
+                elif loader == "csv":
+                    if _HAS_CSV and CSVLoader is not None:
+                        # dùng csv_args để tương thích nhiều version
+                        ld = CSVLoader(
+                            file_path=str(p),
+                            csv_args={"delimiter": self.cfg.csv_delimiter},
+                            source_column=self.cfg.csv_source_column,
+                        )
+                    else:
+                        # Fallback: đọc nhị phân & coi như text
+                        ld = TextLoader(str(p), autodetect_encoding=self.cfg.autodetect_encoding)
                 elif loader == "unstructured":
                     if not HAS_UNSTRUCTURED or UnstructuredFileLoader is None:
                         continue
@@ -137,21 +149,24 @@ class DocLoaderLC:
                         continue
                     try:
                         obj = json.loads(line)
-                        if isinstance(obj, dict) and "question" in obj and "answer" in obj:
-                            out.append(obj)
                     except Exception:
                         continue
+                    item = self._coerce_faq_row(obj)
+                    if item:
+                        out.append(item)
         else:
             try:
                 data = json.loads(p.read_text(encoding="utf-8"))
                 if isinstance(data, list):
                     for obj in data:
-                        if isinstance(obj, dict) and "question" in obj and "answer" in obj:
-                            out.append(obj)
+                        item = self._coerce_faq_row(obj)
+                        if item:
+                            out.append(item)
                 elif isinstance(data, dict) and "items" in data and isinstance(data["items"], list):
                     for obj in data["items"]:
-                        if isinstance(obj, dict) and "question" in obj and "answer" in obj:
-                            out.append(obj)
+                        item = self._coerce_faq_row(obj)
+                        if item:
+                            out.append(item)
             except Exception:
                 pass
         return out
@@ -178,4 +193,28 @@ class DocLoaderLC:
                 "text": text,
                 "metadata": meta
             })
+        return out
+
+    # -------- private: normalize FAQ row --------
+    @staticmethod
+    def _coerce_faq_row(row: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(row, dict):
+            return None
+        q = str(row.get("question", "")).strip()
+        a = str(row.get("answer", "")).strip()
+        if not q or not a:
+            return None
+        out: Dict[str, Any] = {"question": q, "answer": a}
+        if row.get("canonical_id"):
+            out["canonical_id"] = str(row["canonical_id"])
+        if row.get("source"):
+            out["source"] = str(row["source"])
+        meta = row.get("metadata")
+        if isinstance(meta, dict):
+            out["metadata"] = meta
+        if row.get("ts") is not None:
+            try:
+                out["ts"] = int(row["ts"])
+            except Exception:
+                pass
         return out
