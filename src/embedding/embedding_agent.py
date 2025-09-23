@@ -155,3 +155,34 @@ class EmbedderAgent:
                 "ts": int(meta.get("ts", ts or 0)),
             })
         return out
+
+    # ---------- public APIs ----------
+    def encode_texts(self, texts: List[str]) -> List[List[float]]:
+        """
+        Encode một danh sách câu/đoạn văn thành vectors (float32).
+        - Đã L2-normalize khi cfg.normalize_for_cosine và metric == "COSINE".
+        - Trả về List[List[float]] để tiện serialize và dùng với Milvus.
+        """
+        if not texts:
+            return []
+        vecs = self._encode(texts)  # (n, dim) np.ndarray float32
+        return vecs.tolist()
+
+    # Alias cho tương thích ngược với chỗ đang gọi .encode(...)
+    def encode(self, texts: List[str]) -> List[List[float]]:
+        return self.encode_texts(texts)
+
+    def info(self) -> Dict[str, Any]:
+        """Returns configuration information about the embedder agent to satisfy IEmbedder."""
+        chosen_model = (
+            self.cfg.vi_model_name
+            if self.cfg.language == "vi"
+            else self.cfg.model_name
+        )
+        return {
+            "chosen_model": chosen_model,
+            "language": self.cfg.language,
+            "device": self.cfg.device,
+            "metric": self.cfg.metric,
+            "dim": self.dim
+        }

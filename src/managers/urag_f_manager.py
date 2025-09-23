@@ -1,12 +1,34 @@
-# src/managers/f_manager.py
+# -*- coding: utf-8 -*-
+"""
+FManager — FAQ pipeline orchestrator
+===================================
+
+Chức năng đúng theo yêu cầu:
+1) augmentedChunks tài liệu -> FAQ agent -> tạo FAQ gốc -> FAQ agent -> enrich -> embed -> indexing -> faq db
+2) FAQ (gốc) -> FAQ agent -> enrich -> embed -> indexing -> faq db
+
+🆕 Bổ sung tiện ích/one-shot để dễ tích hợp với DManager:
+- 🆕 `coerce_from_augmented(...)` — chuyển augmentedChunks (original/transformed) sang `AugmentedChunk`
+- 🆕 `run_from_augmented(...)` — chạy trọn nhánh (1) và index vào Milvus qua `IndexingAgent`
+- 🆕 `run_from_roots(...)` — chạy trọn nhánh (2) và index
+- 🆕 `index(...)` — tiện ích upsert vào Milvus (dual collections) bằng `IndexingAgent`
+- 🆕 `info()` — trả thông tin cấu hình + embedder
+- 🔧 `make_index_payload(...)` — thêm tham số `metric` (không còn hardcode "COSINE")
+- 🔧 `_mk_id(...)` — đổi sang id ổn định bằng MD5 (tránh phụ thuộc PYTHONHASHSEED)
+"""
 from __future__ import annotations
-from typing import Any, Dict, List, Optional, Tuple, Protocol
+from typing import Any, Dict, List, Optional, Protocol
 from dataclasses import dataclass
 from pydantic import BaseModel, Field, field_validator
 import math
 import json
 import time
+import hashlib  # 🆕 stable id
 
+# 🆕 Dùng trực tiếp IndexingAgent để upsert
+from indexing.indexing_agent import (
+    IndexingAgent, AgentConfig, UpsertIndexReq, Item, IndexParams, Metric,
+)
 
 # ======================= Interfaces (Protocol) =======================
 
@@ -144,18 +166,19 @@ class FManager:
             ))
         return out
 
-    def make_index_payload(self, collection_base: str, items_with_vec: List[FAQWithVec]) -> Dict[str, Any]:
+    # 🔧 thêm tham số metric (trước đây hardcode COSINE)
+    def make_index_payload(self, collection_base: str, items_with_vec: List[FAQWithVec], *, metric: Metric = "COSINE") -> Dict[str, Any]:
         """
         Tạo payload (dict) tương thích IndexingAgent.upsert (dual-collection mode).
         Lưu ý: IndexingAgent sẽ tách sang __faq dựa trên field 'type' = 'faq'.
         """
         return {
-            "op": "index",
+            "op": "upsert",
             "collection": collection_base,
-            "metric_type": "COSINE",
+            "metric_type": metric,
             "items": [
                 {
-                    "id": self._mk_id(it),      # hoặc để IndexingAgent tự upsert theo id do bạn tạo ngoài
+                    "id": self._mk_id(it),
                     "type": "faq",
                     "vector": it.vector,
                     "question": it.question,
@@ -170,6 +193,118 @@ class FManager:
                 }
                 for it in items_with_vec
             ]
+        }
+
+    # 🆕 Adapter: nhận augmentedChunks từ D manager (original/transformed)
+    def coerce_from_augmented(self, augmented: List[Dict[str, Any]]) -> List[AugmentedChunk]:
+        out: List[AugmentedChunk] = []
+        for row in augmented:
+            text = str(row.get("transformed") or row.get("original") or row.get("text") or "").strip()
+            if not text:
+                continue
+            doc_id = str(row.get("doc_id") or "").strip() or "doc"
+            chunk_id = str(row.get("chunk_id") or "").strip() or str(len(out))
+            meta = row.get("metadata") or {}
+            if not isinstance(meta, dict):
+                meta = {"raw_meta": meta}
+            out.append(AugmentedChunk(doc_id=doc_id, chunk_id=chunk_id, text=text, metadata=meta))
+        return out
+
+    # 🆕 One-shot: Nhánh (1) — từ augmentedChunks tới index
+    def run_from_augmented(
+        self,
+        augmented: List[Dict[str, Any]],
+        *,
+        collection_base: str,
+        paraphrase_n: int = 5,
+        metric: Metric = "COSINE",
+        index_params: Optional[IndexParams] = None,
+        shards: int = 2,
+        build_index: bool = True,
+    ) -> Dict[str, Any]:
+        chunks = self.coerce_from_augmented(augmented)
+        built = self.generate(chunks, paraphrase_n=paraphrase_n)
+        vec_items = self.embed(built["faqs"])  # embed all enriched (gồm cả roots nếu generator trả về)
+        payload = self.make_index_payload(collection_base, vec_items, metric=metric)
+        # Upsert bằng IndexingAgent
+        ia = IndexingAgent(AgentConfig())
+        req = UpsertIndexReq(
+            op="upsert", collection=collection_base, dim=len(vec_items[0].vector) if vec_items else None,
+            metric_type=metric, items=[Item(**it) if not isinstance(it, Item) else it for it in payload["items"]],
+            shards_num=shards, index_params=index_params, build_index=build_index,
+        )
+        resp = ia.process(req.model_dump())
+        return {
+            "summary": {
+                "chunks_in": len(chunks),
+                "roots": len(built["roots"]),
+                "faqs": len(built["faqs"]),
+                "embedded": len(vec_items),
+            },
+            "resp": resp,
+        }
+
+    # 🆕 One-shot: Nhánh (2) — từ FAQ gốc tới index
+    def run_from_roots(
+        self,
+        roots: List[Dict[str, Any]],
+        *,
+        collection_base: str,
+        paraphrase_n: int = 5,
+        metric: Metric = "COSINE",
+        index_params: Optional[IndexParams] = None,
+        shards: int = 2,
+        build_index: bool = True,
+    ) -> Dict[str, Any]:
+        enriched_raw = self.gen.enrich_from_roots(roots, paraphrase_n=paraphrase_n)
+        faqs = [self._coerce_faq_item(e) for e in enriched_raw]
+        vec_items = self.embed(faqs)
+        payload = self.make_index_payload(collection_base, vec_items, metric=metric)
+        ia = IndexingAgent(AgentConfig())
+        req = UpsertIndexReq(
+            op="upsert", collection=collection_base, dim=len(vec_items[0].vector) if vec_items else None,
+            metric_type=metric, items=[Item(**it) if not isinstance(it, Item) else it for it in payload["items"]],
+            shards_num=shards, index_params=index_params, build_index=build_index,
+        )
+        resp = ia.process(req.model_dump())
+        return {
+            "summary": {
+                "roots_in": len(roots),
+                "faqs": len(faqs),
+                "embedded": len(vec_items),
+            },
+            "resp": resp,
+        }
+
+    # 🆕 Tiện ích index trực tiếp (đã có vector)
+    def index(
+        self,
+        items_with_vec: List[FAQWithVec],
+        *,
+        collection_base: str,
+        metric: Metric = "COSINE",
+        index_params: Optional[IndexParams] = None,
+        shards: int = 2,
+        build_index: bool = True,
+    ) -> Dict[str, Any]:
+        payload = self.make_index_payload(collection_base, items_with_vec, metric=metric)
+        ia = IndexingAgent(AgentConfig())
+        req = UpsertIndexReq(
+            op="upsert", collection=collection_base, dim=len(items_with_vec[0].vector) if items_with_vec else None,
+            metric_type=metric, items=[Item(**it) if not isinstance(it, Item) else it for it in payload["items"]],
+            shards_num=shards, index_params=index_params, build_index=build_index,
+        )
+        return ia.process(req.model_dump())
+
+    # 🆕 Expose thông tin cấu hình & embedder
+    def info(self) -> Dict[str, Any]:
+        return {
+            "cfg": {
+                "embed_field": self.cfg.embed_field,
+                "default_source": self.cfg.default_source,
+                "l2_normalize": self.cfg.l2_normalize,
+            },
+            "embedder": (self.embedder.info() if hasattr(self.embedder, "info") else {}),
         }
 
     # --------- helpers ---------
@@ -202,10 +337,7 @@ class FManager:
         for i in range(len(v)):
             v[i] *= inv
 
+    # 🔧 dùng MD5 để có id ổn định (deterministic)
     def _mk_id(self, it: FAQWithVec) -> str:
-        """
-        Nếu bạn muốn tự phát sinh id cho FAQ trước khi indexing. Ở đây mình tạo deterministic id nhẹ nhàng.
-        Có thể thay bằng UUID hoặc id do canonical mapping quản lý.
-        """
-        base = f"{(it.canonical_id or 'c')[:12]}::{('p' if it.is_paraphrase else 'r')}::{hash(it.question) & 0xfffffff}"
-        return base
+        base = f"{(it.canonical_id or 'c')[:32]}|{int(it.is_paraphrase)}|{(it.question or '')[:256]}"
+        return hashlib.md5(base.encode("utf-8")).hexdigest()
