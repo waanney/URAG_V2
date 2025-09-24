@@ -122,6 +122,7 @@ def main() -> None:
     # --- SearchAgent ---
     s_cfg = SearchConfig(
         collection_base=base,
+        
         faq_top_k=10, doc_top_k=5,
         # Ưu tiên FAQ cao hơn (hạ tFAQ, nâng tDOC). Tuỳ bạn tinh chỉnh.
         tFAQ=0.70, tDOC=0.60,

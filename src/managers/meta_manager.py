@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-meta_manager.py — Central Orchestrator for RAG Ingestion (fixed FAQ import)
+meta_manager.py — Central Orchestrator for RAG Ingestion
 
 Workflow:
 1) input_type='docs'
@@ -21,14 +21,16 @@ from src.managers.urag_d_manager import URagDManager, DManagerConfig
 from src.managers.urag_f_manager import (
     FManager, FManagerConfig, IFaqGenerator, IEmbedder
 )
-from src.llm.URag_D.document_loader import DocLoaderLC
 
 # ---------- Core components ----------
 from src.embedding.embedding_agent import EmbedderAgent, EmbConfig
 from src.indexing.indexing_agent import Metric
 
-# ---------- ✅ Correct FAQ import (lowercase) ----------
-from src.llm.URag_F.FAQ import FAQAgent, FAQPair  # <-- SỬA Ở ĐÂY
+# ---------- Load FAQs from file ----------
+from src.llm.URag_D.document_loader import DocLoaderLC
+
+# ---------- FAQ (LLM) ----------
+from src.llm.URag_F.FAQ import FAQAgent, FAQPair
 
 
 # ======================= FAQ Generator Adapter =======================
@@ -114,8 +116,6 @@ class FAQGeneratorAdapter(IFaqGenerator):
         enriched: List[Dict[str, Any]] = list(roots)  # cộng dồn
 
         # map lại thành dicts đúng schema FManager
-        # - canonical_id lấy từ root tương ứng (map theo answer+question gốc)
-        #   (ở đây đơn giản: gom theo answer; hoặc build map theo (question, answer) nếu bạn cần chặt chẽ hơn)
         id_by_answer: Dict[str, str] = {}
         meta_by_answer: Dict[str, Dict[str, Any]] = {}
         for r in roots:
@@ -176,7 +176,7 @@ class MetaManager:
         self.embedder: IEmbedder = EmbedderAgent(emb_cfg)
         print(f"[MetaManager] Embedder ready (language={self.cfg.language})")
 
-        # FAQ generator adapter (dùng FAQAgent mới)
+        # FAQ generator adapter (dùng FAQAgent)
         self.faq_generator: IFaqGenerator = FAQGeneratorAdapter(
             api_key_env=self.cfg.faq_api_key_env,
             model_name=self.cfg.faq_model_name,
@@ -184,15 +184,16 @@ class MetaManager:
             enrich_pairs_per_seed=self.cfg.faq_paraphrase_n,
         )
 
-        # Child managers
-        self.cfg.d_manager_config.collection_base = self.cfg.collection_base
-        self.cfg.d_manager_config.metric_type = self.cfg.metric_type
-        self.cfg.d_manager_config.language = self.cfg.language
-        self.d_manager = URagDManager(self.cfg.d_manager_config)
+        # ---------- Child managers ----------
+        # Khớp với URagDManager mới: dùng 'milvus_collection_base', 'metric', 'lang'
+        self.cfg.d_manager_config.milvus_collection_base = self.cfg.collection_base
+        self.cfg.d_manager_config.metric = self.cfg.metric_type
+        self.cfg.d_manager_config.lang = ("vi" if self.cfg.language.lower() == "vi" else "default")
+        self.d_manager = URagDManager(self.cfg.d_manager_config)  # uses run_pipeline(), get_augmented_chunks()
 
         self.f_manager = FManager(self.faq_generator, self.embedder, self.cfg.f_manager_config)
 
-        # Loader: đọc dir tài liệu & JSON/JSONL FAQs
+        # Loader: đọc JSON/JSONL FAQs khi input_type='faqs'
         self.doc_loader = DocLoaderLC()
 
     # ------------- public API -------------
@@ -209,22 +210,29 @@ class MetaManager:
 
         if input_type == "docs":
             # Step 1: Documents -> chunks -> LLM augment -> embed/index (DOC)
-            print("[MetaManager] step-1: DManager.run(...)")
-            d_res = self.d_manager.run(docs_root_dir=input_path, return_augmented=True)
-            augmented = d_res.get("augmented_chunks") or []
+            print("[MetaManager] step-1: DManager.run_pipeline(...)")
+            d_resp = self.d_manager.run_pipeline(
+                root_dir=input_path,
+                collection_base=self.cfg.collection_base
+            )  # returns indexing response for DOCs  :contentReference[oaicite:2]{index=2}
+
+            augmented = self.d_manager.get_augmented_chunks()  # List[AugmentedItem] (TypedDict)
+
             if not augmented:
                 return {
                     "status": "ok",
                     "input_type": "docs",
                     "total_sec": round(time.time() - t0, 2),
-                    "d_manager_summary": d_res.get("summary"),
+                    "d_manager_summary": d_resp,
                     "f_manager_summary": "skipped_no_augmented"
                 }
 
-            # Step 2: Augmented -> FManager (generate roots -> enrich -> embed/index FAQ)
-            print("[MetaManager] step-2: FManager.run_from_augmented(...)")
+            # 🔧 Chuyển TypedDict -> Dict[str, Any] để Pylance im lặng
+            augmented_dicts: List[Dict[str, Any]] = [dict(x) for x in augmented]
+
+            # Step 2: Augmented -> FManager
             f_res = self.f_manager.run_from_augmented(
-                augmented=augmented,
+                augmented=augmented_dicts,
                 collection_base=self.cfg.collection_base,
                 paraphrase_n=self.cfg.faq_paraphrase_n,
                 metric=self.cfg.metric_type,
@@ -234,11 +242,11 @@ class MetaManager:
                 "status": "success",
                 "input_type": "docs",
                 "total_sec": round(time.time() - t0, 2),
-                "d_manager_summary": d_res.get("summary"),
+                "d_manager_summary": d_resp,
                 "f_manager_summary": f_res.get("summary"),
                 "indexing_responses": {
-                    "docs": d_res.get("summary", {}).get("indexing_status"),
-                    "faqs": f_res.get("resp", {}).get("status"),
+                    "docs": d_resp,
+                    "faqs": f_res.get("resp", {}),
                 }
             }
 
@@ -256,17 +264,18 @@ class MetaManager:
                 collection_base=self.cfg.collection_base,
                 paraphrase_n=self.cfg.faq_paraphrase_n,
                 metric=self.cfg.metric_type,
-            )
+            )  # :contentReference[oaicite:5]{index=5}
             return {
                 "status": "success",
                 "input_type": "faqs",
                 "total_sec": round(time.time() - t0, 2),
                 "f_manager_summary": f_res.get("summary"),
-                "indexing_responses": {"faqs": f_res.get("resp", {}).get("status")}
+                "indexing_responses": {"faqs": f_res.get("resp", {})}
             }
 
         else:
             raise ValueError("input_type must be one of: 'docs', 'faqs'")
+
 
 # ======================= Quick demo =======================
 if __name__ == "__main__":

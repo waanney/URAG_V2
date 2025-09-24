@@ -26,7 +26,7 @@ from src.indexing.indexing_agent import IndexingAgent, AgentConfig, SearchReq
 # ======================= LLM (Gemini) adapter =======================
 
 class GeminiConfig(BaseModel):
-    model: str = Field(default="gemini-2.5-flash")
+    model: str = Field(default="gemini-1.5-flash")
     api_key: Optional[str] = None
     system_instruction: Optional[str] = Field(
         default="Bạn là trợ lý chỉ trả lời dựa trên CONTEXT. Nếu thiếu dữ liệu, hãy nói 'không có thông tin'."

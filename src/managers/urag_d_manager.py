@@ -1,282 +1,350 @@
 # -*- coding: utf-8 -*-
 """
-URAG D Manager — Orchestrator for Documents ➜ (Chunk ➜ LLM Augment ➜ Embed ➜ Index)
-=================================================================================
-Vị trí file (khớp tree của bạn): `src/managers/urag_d_manager.py`
+URagDManager — D-side pipeline (NO direct GoogleModel here)
 
-Pipeline:
-  Document -> SemanticChunker -> chunks
-  chunks -> LLM (textGenerate) -> augmentedChunks
-  augmentedChunks -> Embed -> Index (Milvus) qua `indexing.indexing_agent.IndexingAgent`
-  augmentedChunks -> có thể trả ra cho MetaManager để chuyển tiếp sang FManager
+Luồng:
+  1) Document -> DocumentLoaderAgent -> documents (doc_id, text, metadata)
+  2) documents -> SemanticChunkerAgent -> chunks (doc_id, chunk_id, text)
+  3) chunks -> ExistingTextGenerateAugmenter (xài textGenerate.py) -> augmentedChunks [{doc_id, chunk_id, original, transformed}]
+  4) augmentedChunks -> EmbedderAgent -> vectors
+  5) vectors -> IndexingAgent (__doc) -> Milvus
 
-Phụ thuộc sẵn có theo tree:
-- from llm.URag_D.document_loader import DocLoaderLC, DocLoaderConfig
-- from llm.URag_D.semantic_chunker import SemanticChunkerLC, LCChunkerConfig
-- from llm.URag_D import textGenerate as tg
-- from embedding.embedding_agent import EmbConfig, EmbedderAgent, Metric as EmbMetric
-- from indexing.indexing_agent import (
-    IndexingAgent, AgentConfig, UpsertIndexReq, CreateCollectionReq, Item, IndexParams,
-    Metric, IndexType,
-)
-      IndexingAgent, AgentConfig, UpsertIndexReq, CreateCollectionReq, Item, IndexParams
-  )
+API:
+  dm = URagDManager(DManagerConfig(...))
+  res = dm.run_pipeline(root_dir="path/to/docs", collection_base="ura_demo")
+  aug = dm.get_augmented_chunks()  # đưa sang F-Manager
+
+Lưu ý:
+- D-manager không gọi GoogleModel trực tiếp; phần augment dùng lại agent có sẵn trong textGenerate.py
+- Đã fix type cho Pylance (Literal, cast, v.v.)
 """
+
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, cast
-import json
-import time
-import hashlib
+from typing import Any, Dict, List, Optional, Tuple, Protocol, Literal, Union, cast, TypedDict
+import os, json, time
 
-# ---------- Imports khớp cấu trúc dự án ----------
-from src.llm.URag_D.document_loader import DocLoaderLC, DocLoaderConfig
-from src.llm.URag_D.semantic_chunker import SemanticChunkerLC, LCChunkerConfig
-from src.llm.URag_D import textGenerate as tg
-from src.embedding.embedding_agent import EmbConfig, EmbedderAgent, Metric as EmbMetric
-from src.indexing.indexing_agent import (
-    IndexingAgent, AgentConfig, UpsertIndexReq, CreateCollectionReq, Item, IndexParams,
-    Metric, IndexType,
+# ===== Doc Loader Agent (wrapper Pydantic) =====
+from src.llm.URag_D.doc_loader_agent import (  # phiên bản bạn đã dùng
+    DocumentLoaderAgent, DLConfig, DLRequest, DocRecord
+)
+
+# ===== Semantic Chunker Agent =====
+from src.llm.URag_D.chunker_agent import (
+    SemanticChunkerAgent, SemanticChunkerAgentConfig, SemanticChunkerRequest
 )
 
 
-# ------------------- Cấu hình -------------------
+# ===== Embedding Agent =====
+try:
+    from src.embedding.embedding_agent import EmbConfig, EmbedderAgent
+except Exception:
+    from embedding.embedding_agent import EmbConfig, EmbedderAgent
+
+# ===== Indexing Agent (Milvus) =====
+from src.indexing.indexing_agent import (
+    IndexingAgent, AgentConfig as IndexCfg,
+    CreateCollectionReq, UpsertIndexReq, Item
+)
+
+# ===================== Config & Models =====================
+
 @dataclass
 class DManagerConfig:
-    # Nguồn tài liệu
-    docs_root_dir: Optional[str] = None
-
-    # Tên base collection (IndexingAgent sẽ tự tách __doc / __faq nếu bật dual)
-    collection_base: str = "ura_rag"
-
-    # Ngôn ngữ & embedding
-    language: str = "default"  # "vi" | "default"
-    vi_model_name: str = "dangvantuan/vietnamese-embedding"
-    en_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
-    emb_device: Optional[str] = None
-    normalize_for_cosine: bool = True
+    # Data loading
+    root_dir: str = "data/docs"
+    default_source: str = "doc_src"
+    limit_docs: Optional[int] = None
 
     # Chunker
-    chunker: Optional[LCChunkerConfig] = None
+    lang: Literal["default", "vi", "en"] = "vi"
+    buffer_size: int = 1
+    min_chunk_size: Optional[int] = None
+    number_of_chunks: Optional[int] = None
 
-    # Milvus / Index params
-    metric_type: Metric = "COSINE"  # Literal| "IP" | "L2"
-    index_type: IndexType = "HNSW"   # Literal| "IVF_FLAT" | "IVF_SQ8" | "IVF_PQ"
-    index_params: Optional[Dict[str, Any]] = None  # ví dụ {"M":32, "efConstruction":200}
+    # Embedding
+    emb_language: Literal["default", "vi", "en"] = "vi"
+    emb_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
+    emb_vi_model_name: str = "dangvantuan/vietnamese-embedding"
+    emb_device: Optional[str] = None
+    metric: Literal["COSINE", "IP", "L2"] = "COSINE"
+
+    # Indexing
+    milvus_collection_base: str = "ura_rag_demo"
+    milvus_uri: str = os.getenv("MILVUS_URI", "http://127.0.0.1:19530")
+    milvus_token: Optional[str] = os.getenv("MILVUS_TOKEN") or None
     shards_num: int = 2
-    build_index: bool = True
 
-    # Metadata mặc định
-    default_source_doc: str = "doc_src"
+class AugmentedItem(TypedDict):
+    doc_id: str
+    chunk_id: str
+    original: str
+    transformed: str
+# ===================== Augmenter interface & adapters =====================
 
+class IAugmenter(Protocol):
+    def augment(self, doc_id: str, chunk_tuples: List[Tuple[str, str]]) -> List[AugmentedItem]:
+        """
+        chunk_tuples: list of (chunk_id, text) preserving order.
+        Returns: list of dicts {doc_id, chunk_id, original, transformed} in the same order.
+        """
+        ...
+
+
+class ExistingTextGenerateAugmenter(IAugmenter):
+    """
+    Adapter dùng chính agents trong textGenerate.py của bạn (pydantic-ai).
+    Kỳ vọng trong file có:
+      - worker1, worker2: Agent(...)
+      - MyDeps: dataclass có trường listChunks: List[str]
+      - checking_output(raw: str) -> str: strip code-fences
+    """
+    def __init__(self) -> None:
+        try:
+            from src.llm.URag_D.textGenerate import worker1, worker2, MyDeps, checking_output
+        except Exception:
+            from llm.URag_D.textGenerate import worker1, worker2, MyDeps, checking_output
+
+        self.worker1 = worker1
+        self.worker2 = worker2
+        self.MyDeps = MyDeps
+        self.clean = checking_output
+
+    def _run_worker(self, chunks: List[str], which: int = 1) -> List[Dict[str, str]]:
+        deps = self.MyDeps(listChunks=chunks)
+        # dùng worker1 mặc định; nếu which=2 sẽ gọi worker2 (nếu cần)
+        agent = self.worker2 if (which == 2 and self.worker2 is not None) else self.worker1
+        res = agent.run_sync(deps=deps)
+        raw = self.clean(res.output)
+        data = json.loads(raw)
+        if not isinstance(data, list):
+            raise ValueError("Augmenter output must be a JSON list.")
+        # mỗi phần tử phải có 'original','transformed'
+        out: List[Dict[str, str]] = []
+        for x in data:
+            o = (x.get("original") or "").strip()
+            t = (x.get("transformed") or "").strip()
+            out.append({"original": o, "transformed": t})
+        return out
+
+    def augment(self, doc_id: str, chunk_tuples: List[Tuple[str, str]]) -> List[AugmentedItem]:
+        if not chunk_tuples:
+            return []
+        texts: List[str] = [t for (_, t) in chunk_tuples]
+
+        # logic tương tự file mẫu của bạn: chia làm 2 phần gọi 2 worker
+        mid = len(texts) // 2
+        outs: List[Dict[str, str]] = []
+        if mid > 0:
+            outs.extend(self._run_worker(texts[:mid], which=1))
+            outs.extend(self._run_worker(texts[mid:], which=2))
+        else:
+            outs.extend(self._run_worker(texts, which=1))
+
+        # map theo thứ tự (zip) về augmented item
+        augmented: List[AugmentedItem] = []
+        for (chunk_id, original), pair in zip([(cid, txt) for (cid, txt) in chunk_tuples], outs):
+            transformed = pair.get("transformed") or ""
+            transformed = transformed.strip() or original  # fallback giữ nguyên
+            augmented.append({
+                "doc_id": doc_id,
+                "chunk_id": chunk_id,
+                "original": original,
+                "transformed": transformed
+            })
+        return augmented
+
+
+class NoOpAugmenter(IAugmenter):
+    """Không dùng LLM — giữ y nguyên chunk."""
+    def augment(self, doc_id: str, chunk_tuples: List[Tuple[str, str]]) -> List[AugmentedItem]:
+        return [
+            {"doc_id": doc_id, "chunk_id": cid, "original": txt, "transformed": txt}
+            for (cid, txt) in chunk_tuples
+        ]
+
+
+# ===================== D-Manager =====================
 
 class URagDManager:
     """
-    Điều phối pipeline Documents-only theo yêu cầu của bạn.
+    Điều phối D-pipeline: load -> chunk -> augment -> embed -> index
     """
 
-    def __init__(self, cfg: DManagerConfig):
-        self.cfg = cfg
-        # Loader & Chunker
-        self.loader = DocLoaderLC(DocLoaderConfig())
-        self.chunker = SemanticChunkerLC(
-            cfg.chunker or LCChunkerConfig(
-                language=cfg.language,
-                vi_model_name=cfg.vi_model_name,
-                en_model_name=cfg.en_model_name,
+    def __init__(self, cfg: Optional[DManagerConfig] = None, augmenter: Optional[IAugmenter] = None):
+        self.cfg = cfg or DManagerConfig()
+
+        # 1) Doc loader
+        self.doc_loader = DocumentLoaderAgent(DLConfig(autodetect_encoding=True))
+
+        # 2) Chunker
+        self.chunker = SemanticChunkerAgent(
+            SemanticChunkerAgentConfig(
+                language=self.cfg.lang,
+                buffer_size=self.cfg.buffer_size,
+                min_chunk_size=self.cfg.min_chunk_size,
+                number_of_chunks=self.cfg.number_of_chunks,
+                use_agent_embedder=True
             )
         )
-        # Embedder
-        self.embedder = EmbedderAgent(
-            EmbConfig(
-                model_name=cfg.en_model_name,
-                vi_model_name=cfg.vi_model_name,
-                language=("vi" if cfg.language.lower() == "vi" else "default"),
-                device=cfg.emb_device,
-                normalize_for_cosine=cfg.normalize_for_cosine,
-                metric=cast(EmbMetric, self.cfg.metric_type),
-            )
+
+        # 3) Augmenter — dùng lại textGenerate.py (hoặc NoOp)
+        self.augmenter: IAugmenter = augmenter or ExistingTextGenerateAugmenter()
+
+        # 4) Embedder
+        self.embedder = EmbedderAgent(EmbConfig(
+            model_name=self.cfg.emb_model_name,
+            vi_model_name=self.cfg.emb_vi_model_name,
+            language=("vi" if self.cfg.emb_language == "vi" else "default"),
+            device=self.cfg.emb_device,
+            normalize_for_cosine=True,
+            metric=self.cfg.metric,
+        ))
+
+        # 5) Indexer
+        self.indexer = IndexingAgent(IndexCfg(
+            uri=self.cfg.milvus_uri,
+            token=self.cfg.milvus_token,
+            dual_collections=True,          # __doc / __faq
+            normalize_l2_for_cosine=True
+        ))
+
+        # runtime storage
+        self._augmented: List[AugmentedItem] = []
+        self._last_dim: Optional[int] = None
+
+    # ---------- Public getters ----------
+    def get_augmented_chunks(self) -> List[AugmentedItem]:
+        """Trả augmentedChunks (đưa sang F-Manager)."""
+        return list(self._augmented)
+
+    # ---------- Steps ----------
+    def load_documents(self) -> List[DocRecord]:
+        req = DLRequest(
+            mode="normal",
+            root_dir=self.cfg.root_dir,
+            default_source=self.cfg.default_source,
+            limit_docs=self.cfg.limit_docs
         )
-        # Indexing agent (Milvus)
-        self.indexer = IndexingAgent(AgentConfig())
+        resp = self.doc_loader.run(req)
+        return resp.documents  # List[DocRecord]
 
-    # ------------------- Public API -------------------
-    def run(self, docs_root_dir: Optional[str] = None, return_augmented: bool = True) -> Dict[str, Any]:
-        root = docs_root_dir or self.cfg.docs_root_dir
-        assert root, "docs_root_dir chưa được cấu hình"
-
-        # 1) Load tài liệu -> augmented inputs (doc_id, text, metadata)
-        docs = self.loader.load_normal_docs(root)
-        aug_inputs = self.loader.to_augmented_inputs(docs, default_source=self.cfg.default_source_doc)
-
-        # 2) Chunk theo ngữ nghĩa
-        chunks: List[Dict[str, Any]] = []
-        for item in aug_inputs:
-            doc_id = item["doc_id"]
-            text = item["text"]
-            parts = self.chunker.chunk(text, doc_id)
-            for p in parts:
-                p["source"] = item.get("metadata", {}).get("source", self.cfg.default_source_doc)
-                p["metadata"] = item.get("metadata", {})
-            chunks.extend(parts)
-
-        # 3) LLM augment từng chunk
-        augmented_chunks = self._augment_chunks(chunks)
-
-        # 4) Embed và Index
-        ts_now = int(time.time())
-        texts = [ac.get("transformed") or ac.get("original") or "" for ac in augmented_chunks]
-        vectors = self._encode_texts(texts)
-        dim = len(vectors[0]) if vectors else 0
-
-        # 4.1) Đảm bảo collection tồn tại
-        self._ensure_collections(dim)
-
-        # 4.2) Build items và upsert
-        items: List[Item] = []
-        for ac, vec in zip(augmented_chunks, vectors):
-            uid = self._make_id(ac)
-            items.append(
-                Item(
-                    id=uid,
-                    type="doc",
-                    vector=[float(x) for x in vec],
-                    text=ac.get("transformed") or ac.get("original") or "",
-                    source=ac.get("source", self.cfg.default_source_doc),
-                    metadata=ac.get("metadata", {}),
-                    ts=ts_now,
-                )
-            )
-
-        upsert = UpsertIndexReq(
-            op="upsert",
-            collection=self.cfg.collection_base,
-            dim=dim,
-            metric_type=self.cfg.metric_type,
-            items=items,
-            shards_num=self.cfg.shards_num,
-            index_params=(IndexParams(index_type=self.cfg.index_type, metric_type=self.cfg.metric_type, params=(self.cfg.index_params or { }))),
-            build_index=self.cfg.build_index,
-        )
-        resp = self.indexer.process(upsert.model_dump())
-
-        summary = {
-            "docs_loaded": len(aug_inputs),
-            "chunks": len(chunks),
-            "augmented_chunks": len(augmented_chunks),
-            "doc_embedded": len(items),
-            "dim": dim,
-            "indexing_status": resp.get("status"),
-        }
-        out: Dict[str, Any] = {"summary": summary}
-        if return_augmented:
-            out["augmented_chunks"] = augmented_chunks
+    def chunk_documents(self, docs: List[DocRecord]) -> List[Tuple[str, str, str]]:
+        """
+        Return: list of (doc_id, chunk_id, chunk_text)
+        """
+        out: List[Tuple[str, str, str]] = []
+        for d in docs:
+            resp = self.chunker.chunk(SemanticChunkerRequest(text=d.text, doc_id=d.doc_id))
+            for c in resp.chunks:
+                out.append((c.doc_id, c.chunk_id, c.text))
         return out
 
-    # ------------------- Helpers -------------------
-    def _augment_chunks(self, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        if not chunks:
+    def augment_chunks(self, triples: List[Tuple[str, str, str]]) -> List[AugmentedItem]:
+        """
+        triples: (doc_id, chunk_id, text)
+        """
+        if not triples:
+            self._augmented = []
             return []
-        raw_texts = [c.get("text", "") for c in chunks]
-        # Chia 2 worker nếu có; nếu chỉ có 1, vẫn OK
-        parts: List[Tuple[List[str], Any]] = []
-        mid = len(raw_texts) // 2
-        if hasattr(tg, "worker1"):
-            parts.append((raw_texts[:mid], getattr(tg, "worker1")))
-        if hasattr(tg, "worker2"):
-            parts.append((raw_texts[mid:], getattr(tg, "worker2")))
-        if not parts:
-            # Không có worker -> giữ nguyên làm augmented tối thiểu
-            return [
-                {
-                    "doc_id": c.get("doc_id"),
-                    "chunk_id": c.get("chunk_id"),
-                    "original": c.get("text", ""),
-                    "transformed": c.get("text", ""),
-                    "source": c.get("source"),
-                    "metadata": c.get("metadata", {}),
-                }
-                for c in chunks
-            ]
 
-        augmented: List[Dict[str, Any]] = []
-        cursor = 0
-        for texts_slice, worker in parts:
-            if not texts_slice:
-                continue
-            deps = getattr(tg, "MyDeps")(listChunks=texts_slice)
-            results = worker.run_sync(deps=deps)
-            cleaned = getattr(tg, "checking_output")(results.output)
-            try:
-                parsed = json.loads(cleaned)  # list[{original, transformed}]
-            except Exception:
-                parsed = []
+        # nhóm theo doc_id (để quản lý prompt/giới hạn)
+        by_doc: Dict[str, List[Tuple[str, str]]] = {}
+        order_doc: List[str] = []
+        for doc_id, chunk_id, text in triples:
+            if doc_id not in by_doc:
+                order_doc.append(doc_id)
+                by_doc[doc_id] = []
+            by_doc[doc_id].append((chunk_id, text))
 
-            for _ in texts_slice:
-                base = chunks[cursor]
-                cursor += 1
-                row = parsed.pop(0) if parsed else {}
-                original = str(row.get("original", base.get("text", ""))).strip() if isinstance(row, dict) else base.get("text", "")
-                transformed = str(row.get("transformed", original)).strip() if isinstance(row, dict) else original
-                augmented.append(
-                    {
-                        "doc_id": base.get("doc_id"),
-                        "chunk_id": base.get("chunk_id"),
-                        "original": original,
-                        "transformed": transformed,
-                        "source": base.get("source"),
-                        "metadata": base.get("metadata", {}),
-                    }
-                )
+        augmented: List[AugmentedItem] = []
+        for doc_id in order_doc:
+            chunk_tuples = by_doc[doc_id]
+            # Adapter sẽ tự chia batch theo logic có sẵn (worker1/worker2)
+            augmented.extend(self.augmenter.augment(doc_id, chunk_tuples))
 
-        # Bổ sung nếu thiếu vì parsing lỗi
-        while len(augmented) < len(chunks):
-            base = chunks[len(augmented)]
-            augmented.append(
-                {
-                    "doc_id": base.get("doc_id"),
-                    "chunk_id": base.get("chunk_id"),
-                    "original": base.get("text", ""),
-                    "transformed": base.get("text", ""),
-                    "source": base.get("source"),
-                    "metadata": base.get("metadata", {}),
-                }
-            )
+        self._augmented = augmented
         return augmented
 
-    def _encode_texts(self, texts: List[str]) -> List[List[float]]:
-        if not texts:
-            return []
-        # Ưu tiên API encode(list[str]) của EmbedderAgent
-        if hasattr(self.embedder, "encode"):
-            vectors = self.embedder.encode(texts)  # type: ignore[attr-defined]
-            if not vectors or not isinstance(vectors[0], (list, tuple)):
-                raise RuntimeError("EmbedderAgent.encode trả về không hợp lệ")
-            return [list(map(float, v)) for v in vectors]
-        # Fallback: nếu có embed_docs, bóc vector ra
-        if hasattr(self.embedder, "embed_docs"):
-            payload = [
-                {"id": f"tmp-{i}", "text": t, "type": "doc", "metadata": {}, "source": self.cfg.default_source_doc}
-                for i, t in enumerate(texts)
-            ]
-            out = self.embedder.embed_docs(payload, default_source=self.cfg.default_source_doc, ts=int(time.time()))  # type: ignore[attr-defined]
-            return [list(map(float, row.get("vector", []))) for row in out]
-        raise RuntimeError("Không tìm thấy API encode/embed_docs trong EmbedderAgent")
+    def embed_and_index(self, collection_base: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Embed transformed text & upsert vào Milvus __doc
+        """
+        if not self._augmented:
+            return {"status": "empty", "message": "No augmented chunks to index."}
 
-    def _ensure_collections(self, dim: int) -> None:
-        """Gọi create_collection một lần để đảm bảo schema/index tồn tại (dual collections)."""
-        req = CreateCollectionReq(
-            op="create_collection",
-            collection=self.cfg.collection_base,
-            dim=dim,
-            metric_type=self.cfg.metric_type,
-            shards_num=self.cfg.shards_num,
-            index_params=IndexParams(index_type=self.cfg.index_type, metric_type=self.cfg.metric_type, params=(self.cfg.index_params or {})),
+        base = collection_base or self.cfg.milvus_collection_base
+        now_ts = int(time.time())
+
+        # 4) Embed
+        emb_inputs: List[Dict[str, Any]] = []
+        for a in self._augmented:
+            emb_inputs.append({
+                "text": a["transformed"],
+                "source": a["doc_id"],
+                "metadata": {"chunk_id": a["chunk_id"], "original": a["original"]},
+                "ts": now_ts
+            })
+
+        embedded_docs = self.embedder.embed_docs(
+            cast(List[Union[Dict[str, Any], str]], emb_inputs),  # cast để Pylance im lặng
+            default_source="doc_src",
+            ts=now_ts
         )
-        self.indexer.process(req.model_dump())
+        dim = self.embedder.dim
+        self._last_dim = dim
 
-    @staticmethod
-    def _make_id(ac: Dict[str, Any]) -> str:
-        """Sinh id ổn định từ (doc_id, chunk_id, text) để tiện upsert."""
-        base = f"{ac.get('doc_id','')}::{ac.get('chunk_id','')}::{(ac.get('transformed') or ac.get('original') or '')[:64]}"
-        return hashlib.md5(base.encode("utf-8")).hexdigest()
+        # 5) Ensure collections (__doc/__faq)
+        _ = self.indexer.process(CreateCollectionReq(
+            collection=base, dim=dim, metric_type="COSINE", shards_num=self.cfg.shards_num
+        ))
+
+        # Upsert vào __doc
+        items: List[Item] = []
+        for i, d in enumerate(embedded_docs):
+            chunk_id = emb_inputs[i]["metadata"]["chunk_id"]
+            id_join = f"{d['source']}__{chunk_id}"
+            items.append(Item(
+                id=id_join,
+                type="doc",
+                vector=d["vector"],
+                text=d["text"],
+                source=d["source"],
+                metadata=d["metadata"],
+                ts=d["ts"]
+            ))
+
+        res = self.indexer.process(UpsertIndexReq(
+            op="upsert",
+            collection=base,
+            metric_type="COSINE",
+            items=items,
+            shards_num=self.cfg.shards_num,
+            build_index=True
+        ))
+        return res
+
+    def run_pipeline(self, root_dir: Optional[str] = None, collection_base: Optional[str] = None) -> Dict[str, Any]:
+        """One-shot: load -> chunk -> augment -> embed -> index"""
+        if root_dir:
+            self.cfg.root_dir = root_dir
+        docs = self.load_documents()
+        triples = self.chunk_documents(docs)
+        self.augment_chunks(triples)
+        return self.embed_and_index(collection_base or self.cfg.milvus_collection_base)
+
+
+# ===================== Demo =====================
+if __name__ == "__main__":
+    cfg = DManagerConfig(
+        root_dir="data/docs",
+        milvus_collection_base=f"ura_dmgr_demo_{int(time.time())}",
+        emb_language="vi",
+        lang="vi"
+    )
+    dmgr = URagDManager(cfg, augmenter=ExistingTextGenerateAugmenter())
+    out = dmgr.run_pipeline()
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+
+    print("\n[augmentedChunks sample]")
+    print(json.dumps(dmgr.get_augmented_chunks()[:5], ensure_ascii=False, indent=2))

@@ -14,7 +14,7 @@ if not api_key:
     raise ValueError("GOOGLE_API_KEY is not set in the environment variables.")
 
 model = GoogleModel(
-    'gemini-2.0-flash', 
+    'gemini-1.5-flash', 
     provider=GoogleProvider(
         api_key=api_key
     )

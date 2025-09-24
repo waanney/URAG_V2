@@ -17,9 +17,9 @@ import os, json, time
 from pathlib import Path
 from typing import Any, Dict, List
 
-from managers.urag_f_manager import FManager, FManagerConfig
-from managers.urag_f_manager import AugmentedChunk, FAQItem, FAQWithVec, IFaqGenerator, IEmbedder
-from indexing.indexing_agent import IndexingAgent, AgentConfig, StatsReq
+from src.managers.urag_f_manager import FManager, FManagerConfig
+from src.managers.urag_f_manager import AugmentedChunk, FAQItem, FAQWithVec, IFaqGenerator, IEmbedder
+from src.indexing.indexing_agent import IndexingAgent, AgentConfig, StatsReq
 from pymilvus import utility
 
 # ---- Embedder adapter (🆕 bọc EmbedderAgent để khớp IEmbedder) ----
