@@ -1,24 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-URagDManager — D-side pipeline (NO direct GoogleModel here)
-
-Luồng:
-  1) Document -> DocumentLoaderAgent -> documents (doc_id, text, metadata)
-  2) documents -> SemanticChunkerAgent -> chunks (doc_id, chunk_id, text)
-  3) chunks -> ExistingTextGenerateAugmenter (xài textGenerate.py) -> augmentedChunks [{doc_id, chunk_id, original, transformed}]
-  4) augmentedChunks -> EmbedderAgent -> vectors
-  5) vectors -> IndexingAgent (__doc) -> Milvus
-
-API:
-  dm = URagDManager(DManagerConfig(...))
-  res = dm.run_pipeline(root_dir="path/to/docs", collection_base="ura_demo")
-  aug = dm.get_augmented_chunks()  # đưa sang F-Manager
-
-Lưu ý:
-- D-manager không gọi GoogleModel trực tiếp; phần augment dùng lại agent có sẵn trong textGenerate.py
-- Đã fix type cho Pylance (Literal, cast, v.v.)
-"""
-
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Protocol, Literal, Union, cast, TypedDict

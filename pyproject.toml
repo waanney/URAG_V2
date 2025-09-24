@@ -11,7 +11,7 @@ requires-python = ">=3.12"
 
 dependencies = [
   "nltk>=3.9.1",
-  "pydantic-ai-slim[google,mistral]",
+  "pydantic-ai-slim[google,mistral,openai]",
   "dotenv>=0.9.9",
   "google>=3.0.0",
   "google-generativeai>=0.8.5",
@@ -22,6 +22,7 @@ dependencies = [
   "langchain-text-splitters>=0.3.11",
   "langchain-community>=0.3.29",
   "langchain-experimental>=0.3.4",
+  "openai>=1.108.1",
 ]
 
 [project.optional-dependencies]

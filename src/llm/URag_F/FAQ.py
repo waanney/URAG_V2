@@ -18,8 +18,7 @@ from __future__ import annotations
 from typing import List, Tuple, Iterable, Set, Optional
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
-from pydantic_ai.models.google import GoogleModel
-from pydantic_ai.providers.google import GoogleProvider
+from src.llm.llm_kernel import KERNEL
 
 
 # =========================
@@ -103,25 +102,20 @@ class FAQAgent:
     """
     def __init__(
         self,
-        api_key: str,
-        model_name: str = "gemini-1.5-flash",
-        min_pairs: int = 4,
+        api_key: Optional[str] = None,
+        model_name: Optional[str] = 'gemini-2.0-flash',
+        min_pairs:int = 4,
         enrich_pairs_per_seed: int = 4,
     ):
-        self.provider = GoogleProvider(api_key=api_key)
-        self.model = GoogleModel(model_name, provider=self.provider)
-
+        self.model = KERNEL.get_active_model(model_name=model_name)
         self.min_pairs = int(min_pairs)
-        self.enrich_pairs_per_seed = int(enrich_pairs_per_seed)
+        self.enriched_pairs_per_seed = int(enrich_pairs_per_seed)
 
-        # Agent generate: đầu ra (q, a)
         self.gen_agent = Agent(
             self.model,
             system_prompt="Bạn nhận prompt JSON/text và chỉ trả về JSON đúng schema yêu cầu.",
             output_type=_GenOut,
         )
-
-        # Agent enrich-questions: đầu ra chỉ là list câu hỏi
         self.enrich_q_agent = Agent(
             self.model,
             system_prompt="Bạn nhận prompt JSON/text và chỉ trả về JSON đúng schema yêu cầu.",
@@ -173,7 +167,7 @@ class FAQAgent:
             prompt = PROMPT_ENRICH_QUESTIONS.format(
                 seed_q=f.question.replace('"', '\\"'),
                 seed_a=f.answer.replace('"', '\\"'),
-                n_variants=self.enrich_pairs_per_seed,
+                n_variants=self.enriched_pairs_per_seed,
             )
             out = self.enrich_q_agent.run_sync(prompt).output
             for q in (out.questions or []):
@@ -206,7 +200,7 @@ class FAQAgent:
             prompt = PROMPT_ENRICH_QUESTIONS.format(
                 seed_q=f.question.replace('"', '\\"'),
                 seed_a=f.answer.replace('"', '\\"'),
-                n_variants=self.enrich_pairs_per_seed,
+                n_variants=self.enriched_pairs_per_seed,
             )
             out = (await self.enrich_q_agent.run(prompt)).output
             for q in (out.questions or []):
@@ -222,37 +216,3 @@ class FAQAgent:
         more = await self.aenrich(base)
         merged = self._dedup([*base, *more])
         return FAQList(faqs=merged)
-
-
-# =========================
-# Demo chạy độc lập
-# =========================
-if __name__ == "__main__":
-    import os
-
-    API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
-    if not API_KEY:
-        raise SystemExit("Thiếu GEMINI_API_KEY / GOOGLE_API_KEY trong môi trường.")
-
-    sample_doc = """
-    Quy chế tuyển sinh quy định thời gian đăng ký xét tuyển, ngưỡng đảm bảo chất lượng đầu vào (điểm sàn),
-    và các tiêu chí xét học bổng cho sinh viên xuất sắc nếu có. Mọi thông tin chi tiết công bố trong thông báo của trường.
-    """
-
-    agent = FAQAgent(api_key=API_KEY, model_name="gemini-1.5-flash",
-                     min_pairs=4, enrich_pairs_per_seed=4)
-
-    base = agent.generate(sample_doc)
-    print("\n[Base FAQs]")
-    for i, it in enumerate(base, 1):
-        print(f"{i}. Q: {it.question}\n   A: {it.answer}")
-
-    more = agent.enrich(base)
-    print("\n[Enriched (paraphrased questions, SAME answers)]")
-    for i, it in enumerate(more, 1):
-        print(f"{i}. Q: {it.question}\n   A: {it.answer}")
-
-    merged = agent.generate_and_enrich(sample_doc, do_enrich=True)
-    print("\n[Merged FAQs]")
-    for i, it in enumerate(merged.faqs, 1):
-        print(f"{i}. Q: {it.question}\n   A: {it.answer}")

@@ -1,16 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-meta_manager.py — Central Orchestrator for RAG Ingestion
-
-Workflow:
-1) input_type='docs'
-   - URagDManager: load -> chunk -> LLM augment -> embed -> index (DOC)
-   - FManager: augmented_chunks -> generate roots (FAQAgent) -> enrich (paraphrase Q only) -> embed -> index (FAQ)
-
-2) input_type='faqs'
-   - load FAQs (.json / .jsonl) -> enrich (FAQAgent) -> embed -> index (FAQ)
-"""
-
 from __future__ import annotations
 import os, json, time, uuid
 from dataclasses import dataclass, field
@@ -38,22 +25,17 @@ from src.llm.URag_F.FAQ import FAQAgent, FAQPair
 class FAQGeneratorAdapter(IFaqGenerator):
     """
     Adapter để FManager dùng được logic từ FAQAgent (enrich chỉ đổi question, answer giữ nguyên).
+    Dùng KERNEL (trong FAQAgent) để lấy LLM; không cấu hình key/model tại đây.
     """
     def __init__(
         self,
-        api_key_env: str = "GEMINI_API_KEY",
-        model_name: str = "gemini-1.5-flash",
         min_pairs: int = 4,
         enrich_pairs_per_seed: int = 4,
     ):
-        api_key = os.getenv(api_key_env) or os.getenv("GOOGLE_API_KEY") or ""
-        if not api_key:
-            raise RuntimeError(
-                "FAQGeneratorAdapter: thiếu GEMINI_API_KEY/GOOGLE_API_KEY trong môi trường."
-            )
+        # Không truyền api_key/model_name -> FAQAgent sẽ gọi KERNEL.get_active_model()
         self._agent = FAQAgent(
-            api_key=api_key,
-            model_name=model_name,
+            api_key=None,
+            model_name=None,
             min_pairs=min_pairs,
             enrich_pairs_per_seed=enrich_pairs_per_seed,
         )
@@ -109,8 +91,8 @@ class FAQGeneratorAdapter(IFaqGenerator):
                 seed_pairs.append(FAQPair(question=q, answer=a))
 
         # nếu muốn override số biến thể/seed theo tham số paraphrase_n:
-        if paraphrase_n and paraphrase_n != self._agent.enrich_pairs_per_seed:
-            self._agent.enrich_pairs_per_seed = paraphrase_n
+        if paraphrase_n and paraphrase_n != self._agent.enriched_pairs_per_seed:
+            self._agent.enriched_pairs_per_seed = paraphrase_n
 
         new_pairs = self._agent.enrich(seed_pairs)  # chỉ câu hỏi mới, answer = seed answer
         enriched: List[Dict[str, Any]] = list(roots)  # cộng dồn
@@ -147,11 +129,9 @@ class MetaManagerConfig:
     metric_type: Metric = "COSINE"
     language: str = "default"  # "vi" | "default"
 
-    # FAQ gen
-    faq_model_name: str = "gemini-1.5-flash"
+    # FAQ gen (model/key do KERNEL quyết định; giữ các tham số nội bộ cho FAQAgent)
     faq_min_pairs: int = 4
     faq_paraphrase_n: int = 5
-    faq_api_key_env: str = "GEMINI_API_KEY"
 
     # children configs
     d_manager_config: DManagerConfig = field(default_factory=DManagerConfig)
@@ -176,10 +156,8 @@ class MetaManager:
         self.embedder: IEmbedder = EmbedderAgent(emb_cfg)
         print(f"[MetaManager] Embedder ready (language={self.cfg.language})")
 
-        # FAQ generator adapter (dùng FAQAgent)
+        # FAQ generator adapter (dùng FAQAgent qua KERNEL)
         self.faq_generator: IFaqGenerator = FAQGeneratorAdapter(
-            api_key_env=self.cfg.faq_api_key_env,
-            model_name=self.cfg.faq_model_name,
             min_pairs=self.cfg.faq_min_pairs,
             enrich_pairs_per_seed=self.cfg.faq_paraphrase_n,
         )
@@ -214,7 +192,7 @@ class MetaManager:
             d_resp = self.d_manager.run_pipeline(
                 root_dir=input_path,
                 collection_base=self.cfg.collection_base
-            )  # returns indexing response for DOCs  :contentReference[oaicite:2]{index=2}
+            )  # returns indexing response for DOCs
 
             augmented = self.d_manager.get_augmented_chunks()  # List[AugmentedItem] (TypedDict)
 
@@ -264,7 +242,7 @@ class MetaManager:
                 collection_base=self.cfg.collection_base,
                 paraphrase_n=self.cfg.faq_paraphrase_n,
                 metric=self.cfg.metric_type,
-            )  # :contentReference[oaicite:5]{index=5}
+            )
             return {
                 "status": "success",
                 "input_type": "faqs",
@@ -276,29 +254,3 @@ class MetaManager:
         else:
             raise ValueError("input_type must be one of: 'docs', 'faqs'")
 
-
-# ======================= Quick demo =======================
-if __name__ == "__main__":
-    # tạo thử data đơn giản
-    os.makedirs("demo_docs", exist_ok=True)
-    with open("demo_docs/a.txt","w",encoding="utf-8") as f:
-        f.write("Điểm sàn, mốc thời gian đăng ký xét tuyển, và chính sách học bổng nếu có sẽ được công bố chính thức.")
-
-    os.makedirs("demo_faqs", exist_ok=True)
-    with open("demo_faqs/root.jsonl","w",encoding="utf-8") as f:
-        f.write(json.dumps({"question":"Điểm sàn tuyển sinh là bao nhiêu?","answer":"Nhà trường công bố theo từng năm."}, ensure_ascii=False) + "\n")
-
-    cfg = MetaManagerConfig(
-        collection_base="rag_meta_demo",
-        faq_model_name="gemini-1.5-flash",
-        faq_min_pairs=3,
-        faq_paraphrase_n=2,
-        language="vi",
-    )
-    mm = MetaManager(cfg)
-
-    print("\n>>> DOCS PIPELINE")
-    print(json.dumps(mm.run("demo_docs","docs"), ensure_ascii=False, indent=2))
-
-    print("\n>>> FAQS PIPELINE")
-    print(json.dumps(mm.run("demo_faqs/root.jsonl","faqs"), ensure_ascii=False, indent=2))
