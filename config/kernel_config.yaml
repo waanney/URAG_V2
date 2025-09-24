@@ -1,0 +1,7 @@
+default_provider: "google" # google | ollama
+providers:
+  google:
+    model: "gemini-1.5-flash"
+  ollama:
+    model: "llama3"
+    base_url: "http://localhost:11434"

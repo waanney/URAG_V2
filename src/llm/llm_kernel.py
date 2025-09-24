@@ -34,6 +34,7 @@ from __future__ import annotations
 import os
 import json
 import logging
+import yaml
 from threading import RLock
 from typing import Callable, Dict, Literal, Optional, Tuple, Union
 from pydantic import BaseModel, Field, ValidationError
@@ -224,6 +225,52 @@ class LLMKernel:
         prov = OllamaProvider(base_url=base_url)
         return OpenAIChatModel(model_name, provider=prov)
 
+    def load_config_from_yaml(self, path: str = "config/kernel_config.yaml") -> Optional[LLMConfig]:
+        """Đọc file YAML, parse và đặt cấu hình mặc định cho Kernel."""
+        if not os.path.exists(path):
+            log.warning(f"Không tìm thấy file cấu hình '{path}'. Kernel sẽ hoạt động dựa trên ENV hoặc fallback.")
+            return None
+        
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+        except Exception as e:
+            log.error(f"Lỗi khi đọc hoặc parse file YAML '{path}': {e}")
+            return None
+
+        # Lấy provider mặc định từ file config
+        default_provider = data.get("default_provider")
+        if not default_provider:
+            log.error(f"File '{path}' thiếu key 'default_provider'.")
+            return None
+
+        # Lấy dictionary chứa cấu hình của tất cả providers
+        provider_configs = data.get("providers", {})
+        config_data = provider_configs.get(default_provider)
+        if not config_data:
+            log.error(f"Không tìm thấy cấu hình cho provider '{default_provider}' trong file '{path}'.")
+            return None
+
+        try:
+            cfg: Optional[LLMConfig] = None
+            if default_provider == "google":
+                # Dùng Pydantic model để parse và validate dữ liệu
+                cfg = GoogleConfig(**config_data)
+            elif default_provider == "ollama":
+                cfg = OllamaConfig(**config_data)
+            else:
+                log.error(f"Provider '{default_provider}' không được hỗ trợ.")
+                return None
+            
+            # Dùng hàm configure để set cả default và active config ban đầu
+            self.configure(cfg)
+            if self._active_config is None:
+                self.set_active_config(cfg)
+            log.info(f"Đã tải cấu hình mặc định từ '{path}' thành công. Provider: {default_provider}")
+            return cfg
+        except ValidationError as e:
+            log.error(f"Dữ liệu cấu hình cho '{default_provider}' trong '{path}' không hợp lệ: {e}")
+            return None
 
 # =====================================
 # Global kernel (để mọi nơi import dùng chung)
