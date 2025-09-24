@@ -1,150 +1,31 @@
 # -*- coding: utf-8 -*-
 """
-SearchAgent (Pydantic) — URAG Inference Pipeline
+SearchAgent (Pydantic) — URAG Inference Pipeline (Kernel-based LLM)
 Tier-1: FAQ -> trả answer trực tiếp nếu vượt ngưỡng
-Tier-2: Doc  -> xây prompt từ doc, gửi LLM (Gemini) -> trả lời
+Tier-2: Doc  -> xây prompt từ doc, gửi LLM (qua KERNEL) -> trả lời
 Tier-3: Fallback nếu không có gì liên quan
 
 Phụ thuộc:
 - /src/embedding/embedding_agent.py  (EmbedderAgent)
 - /src/indexing/indexing_agent.py    (IndexingAgent, SearchReq)
-- Gemini API: ưu tiên SDK mới "google.genai" (GA, 2025); fallback "google.generativeai"
+- /src/llm/llm_kernel.py             (KERNEL: UI/ENV chọn provider/model)
 
-ENV:
-- GEMINI_API_KEY=xxx   (SDK mới auto đọc; vẫn hỗ trợ truyền thủ công)
+Ghi chú:
+- LLM được lấy từ KERNEL.get_active_model(); provider/model do UI/ENV quyết định.
+- Không phụ thuộc GEMINI SDK trực tiếp ở đây.
 """
 
 from __future__ import annotations
 from typing import Any, Dict, List, Optional, Literal, Tuple
-import os, time, math, json
+import time
 
 from pydantic import BaseModel, Field, field_validator
+from pydantic_ai import Agent
+
 # === Agents của bạn ===
 from src.embedding.embedding_agent import EmbedderAgent, EmbConfig
 from src.indexing.indexing_agent import IndexingAgent, AgentConfig, SearchReq
-
-# ======================= LLM (Gemini) adapter =======================
-
-class GeminiConfig(BaseModel):
-    model: str = Field(default="gemini-1.5-flash")
-    api_key: Optional[str] = None
-    system_instruction: Optional[str] = Field(
-        default="Bạn là trợ lý chỉ trả lời dựa trên CONTEXT. Nếu thiếu dữ liệu, hãy nói 'không có thông tin'."
-    )
-    temperature: float = 0.2
-    top_p: float = 0.9
-    candidate_count: int = 1
-
-class GeminiLLM:
-    """
-    Supports both SDKs:
-      - New (preferred):   from google import genai
-      - Legacy (fallback): import google.generativeai as genai
-    Typed as Any to keep Pylance happy across versions.
-    """
-    def __init__(self, cfg: GeminiConfig):
-        self.cfg = cfg
-        self._sdk_kind: str = "none"
-        self._client: Any = None
-        self._model_obj: Any = None   # legacy GenerativeModel instance
-        self._init_client()
-
-    def _init_client(self) -> None:
-        api_key = self.cfg.api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            raise RuntimeError("Thiếu API key cho Gemini (đặt GEMINI_API_KEY hoặc GOOGLE_API_KEY).")
-
-        # Try NEW SDK first
-        try:
-            # New SDK (GA 2025): from google import genai
-            from google import genai as genai_new  # type: ignore[import-not-found]
-            client: Any = genai_new.Client(api_key=api_key)  # type: ignore[call-arg]
-            # Smoke test a lightweight attribute to confirm it's the new SDK
-            _ = getattr(client, "models", None)
-            self._sdk_kind = "new"
-            self._client = client
-            return
-        except Exception:
-            pass
-
-        # Fallback to LEGACY SDK
-        import google.generativeai as genai_old  # type: ignore[import-not-found]
-        # Pylance sometimes flags these as “not exported”; treat module as Any.
-        genai_old = genai_old  # type: ignore[no-redef]
-        # configure + GenerativeModel exist at runtime; typing: Any
-        genai_old.configure(api_key=api_key)  # type: ignore[attr-defined]
-        model_obj: Any = genai_old.GenerativeModel(self.cfg.model)  # type: ignore[attr-defined]
-        self._sdk_kind = "old"
-        self._client = genai_old
-        self._model_obj = model_obj
-
-    # --- replace inside class GeminiLLM ---
-    def generate(self, prompt: str) -> str:
-        sys_inst = self.cfg.system_instruction
-
-        if self._sdk_kind == "new":
-            # NEW SDK: contents should be a string (or Parts), not role dicts.
-            base_cfg = {
-                "temperature": self.cfg.temperature,
-                "top_p": self.cfg.top_p,
-                "candidate_count": self.cfg.candidate_count,
-            }
-            try:
-                cfg = dict(base_cfg)
-                if sys_inst:
-                    # Preferred way for new SDK: system_instruction in config
-                    cfg["system_instruction"] = sys_inst
-                resp: Any = self._client.models.generate_content(  # type: ignore[attr-defined]
-                    model=self.cfg.model,
-                    contents=prompt,   # <--- string, not list of role dicts
-                    config=cfg,
-                )
-            except Exception:
-                # Fallback: prepend system text into the prompt and retry without system_instruction
-                fused_prompt = f"{sys_inst}\n\n{prompt}" if sys_inst else prompt
-                resp: Any = self._client.models.generate_content(  # type: ignore[attr-defined]
-                    model=self.cfg.model,
-                    contents=fused_prompt,
-                    config=base_cfg,
-                )
-
-            # Robust text extraction
-            text = getattr(resp, "text", None)
-            if isinstance(text, str) and text.strip():
-                return text
-
-            cand = getattr(resp, "candidates", None)
-            if cand and len(cand) > 0:
-                content = getattr(cand[0], "content", None)
-                parts = getattr(content, "parts", None)
-                if parts:
-                    for p in parts:
-                        t = getattr(p, "text", None)
-                        if t:
-                            return t
-            return ""
-
-        # --- legacy SDK path unchanged ---
-        try:
-            from google.generativeai.types import GenerationConfig  # type: ignore[import-not-found]
-            gen_cfg = GenerationConfig(  # type: ignore[call-arg]
-                temperature=self.cfg.temperature,
-                top_p=self.cfg.top_p,
-                candidate_count=self.cfg.candidate_count,
-            )
-        except Exception:
-            gen_cfg = None
-
-        contents_legacy: list[str] = []
-        if sys_inst:
-            contents_legacy.append(sys_inst)
-        contents_legacy.append(prompt)
-
-        resp: Any = self._model_obj.generate_content(  # type: ignore[attr-defined]
-            contents_legacy,
-            generation_config=gen_cfg,
-        )
-        return getattr(resp, "text", "") or ""
+from src.llm.llm_kernel import KERNEL
 
 
 # ======================= Search agent (Pydantic) =======================
@@ -172,6 +53,9 @@ class SearchConfig(BaseModel):
     # LLM
     max_ctx_docs: int = 4
     disclaimer: Optional[str] = "Lưu ý: Câu trả lời được tổng hợp từ tài liệu hệ thống."
+    llm_system_instruction: str = (
+        "Bạn là trợ lý chỉ trả lời dựa trên CONTEXT. Nếu thiếu dữ liệu, hãy nói 'không có thông tin'."
+    )
 
     @field_validator("tFAQ", "tDOC")
     @classmethod
@@ -210,15 +94,16 @@ class SearchAgent:
         s_cfg: SearchConfig,
         e_cfg: Optional[EmbConfig] = None,
         i_cfg: Optional[AgentConfig] = None,
-        g_cfg: Optional[GeminiConfig] = None,
         embedder: Optional[EmbedderAgent] = None,
         indexer: Optional[IndexingAgent] = None,
-        llm: Optional[GeminiLLM] = None,
     ):
         self.s_cfg = s_cfg
         self.embedder = embedder or EmbedderAgent(e_cfg or EmbConfig())
         self.indexer = indexer or IndexingAgent(i_cfg or AgentConfig())
-        self.llm = llm or GeminiLLM(g_cfg or GeminiConfig())
+
+        # Lấy model do UI/ENV chọn qua KERNEL, tạo pydantic-ai Agent với system prompt cố định
+        llm_model = KERNEL.get_active_model()
+        self._llm_agent = Agent(llm_model, system_prompt=self.s_cfg.llm_system_instruction)
 
         # khớp suffix từ IndexingAgent để tránh lệch tên
         self.doc_collection = f"{self.s_cfg.collection_base}{self.indexer.cfg.doc_suffix}"
@@ -227,6 +112,7 @@ class SearchAgent:
     # ---------------- public API ----------------
     def answer(self, query: str) -> SearchResponse:
         t0 = time.time()
+
         # 1) embed query
         q_vec = self.embedder.encode([query])[0]  # List[float]
 
@@ -246,12 +132,17 @@ class SearchAgent:
         if doc_rel:
             ctx = doc_rel[: self.s_cfg.max_ctx_docs]
             prompt = self._build_prompt(query, ctx)
-            llm_answer = self.llm.generate(prompt).strip()
+            llm_answer = self._llm_agent.run_sync(prompt).output.strip()
             if self.s_cfg.disclaimer and llm_answer:
                 llm_answer += f"\n\n{self.s_cfg.disclaimer}"
             trace = SearchTrace(
                 latency_ms=int((time.time() - t0) * 1000),
-                params={"tDOC": self.s_cfg.tDOC, "doc_top_k": self.s_cfg.doc_top_k, "metric": self.s_cfg.metric, "max_ctx_docs": self.s_cfg.max_ctx_docs},
+                params={
+                    "tDOC": self.s_cfg.tDOC,
+                    "doc_top_k": self.s_cfg.doc_top_k,
+                    "metric": self.s_cfg.metric,
+                    "max_ctx_docs": self.s_cfg.max_ctx_docs,
+                },
                 doc_hits=doc_hits, ctx_used=ctx, prompt=prompt
             )
             return SearchResponse(tier="doc", final_answer=llm_answer or "", trace=trace)
@@ -262,7 +153,11 @@ class SearchAgent:
             params={"tFAQ": self.s_cfg.tFAQ, "tDOC": self.s_cfg.tDOC},
             faq_hits=faq_hits, doc_hits=doc_hits
         )
-        return SearchResponse(tier="none", final_answer="Xin lỗi, tôi không tìm thấy thông tin liên quan trong kho dữ liệu.", trace=trace)
+        return SearchResponse(
+            tier="none",
+            final_answer="Xin lỗi, tôi không tìm thấy thông tin liên quan trong kho dữ liệu.",
+            trace=trace
+        )
 
     # ---------------- internals ----------------
     def _search_faq(self, q_vec: List[float]) -> Tuple[List[Hit], Optional[Hit]]:
@@ -302,7 +197,7 @@ class SearchAgent:
             # pymilvus trả "score" = distance/score tuỳ metric; chuẩn hoá về similarity
             distance = float(h.get("score", 0.0))
             sim = self._distance_to_similarity(distance, self.s_cfg.metric)
-            item = {
+            item: Dict[str, Any] = {
                 "id": h.get("id") or "",
                 "score": distance,
                 "similarity": sim,

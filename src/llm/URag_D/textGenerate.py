@@ -1,6 +1,5 @@
 from pydantic_ai import Agent, RunContext
-from pydantic_ai.models.google import GoogleModel
-from pydantic_ai.providers.google import GoogleProvider
+from src.llm.llm_kernel import KERNEL, GoogleConfig
 from dataclasses import dataclass
 from dotenv import load_dotenv
 import os
@@ -8,16 +7,19 @@ import json
 
 load_dotenv()
 
-api_key = os.getenv("GOOGLE_API_KEY")
+# 1) Thử dùng cấu hình đã lưu (nếu UI từng lưu bằng KERNEL.save_active_config)
+loaded = KERNEL.load_active_config()
 
-if not api_key:
-    raise ValueError("GOOGLE_API_KEY is not set in the environment variables.")
-
-model = GoogleModel(
-    'gemini-1.5-flash', 
-    provider=GoogleProvider(
-        api_key=api_key
+# 2) Nếu chưa có active_config thì ép Google mặc định (bạn có thể bỏ khối này nếu UI luôn set)
+if loaded is None:
+    KERNEL.set_active_config(
+        GoogleConfig(model=os.getenv("GOOGLE_MODEL", "gemini-1.5-flash"))
     )
+
+# 3) Lấy model đang active; cho phép override api_key/model_name qua ENV
+model = KERNEL.get_active_model(
+    model_name=os.getenv("GOOGLE_MODEL", "gemini-1.5-flash"),
+    api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 )
 
 @dataclass
@@ -25,9 +27,7 @@ class MyDeps:
     listChunks: list[str]
 
 def build_prompt(ctx: RunContext[MyDeps])->str:
-
     data_json = json.dumps(ctx.deps.listChunks, ensure_ascii=False)
-
     return """You are a specialist in generating data, you can change a json file including
     chunks to an other json file with a meaningful sentence from each given chunk following these rules:
     **RULES** 
@@ -102,7 +102,6 @@ def get_prompt2(ctx: RunContext[MyDeps]):
 def get_data_from_json_file(file_name: str) -> dict:
     with open(file_name, "r", encoding="utf-8") as f:
         data = (json.load(f))
-
     return data
 
 def parsed(json_output: str) -> None:
@@ -127,30 +126,3 @@ def checking_output(raw_output: str) -> str:
     for i in ["```json", "```", "'''json", "'''"]:
         raw_output = raw_output.replace(i, "")
     return raw_output.strip()
-
-def main():
-    file_path = "src/llm/URag_D/fake_data.json"
-    chunks = get_data_from_json_file(file_path)
-
-    #split chunks
-    size = len(chunks["chunks"]) // 2
-    part1 = chunks['chunks'][:size]
-    part2 = chunks['chunks'][size:]
-
-    deps_1 = MyDeps(listChunks=part1)
-    results1 = worker1.run_sync(deps=deps_1)
-    results1_output = checking_output(results1.output)
-    
-    print(results1_output)
-
-    deps_2 = MyDeps(listChunks=part2)
-    results2 = worker2.run_sync(deps=deps_2)
-    results2_output = checking_output(results2.output)
-
-    print(results2_output)
-
-    parsed(results1_output)
-    parsed(results2_output)
-
-if __name__ == '__main__':
-    main()

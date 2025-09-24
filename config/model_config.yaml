@@ -1,0 +1,17 @@
+version: 1
+active_profile: dev
+
+profiles:
+  dev:
+    provider: google # google | ollama
+    model: gemini-2.0-flash
+    provider_params:
+      api_key: ${GEMINI_API_KEY}
+    gen_params:
+      temperature: 0.2
+      top_p: 0.9
+      max_output_tokens: 2048
+  
+  agents:
+    faq:
+      

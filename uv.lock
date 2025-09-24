@@ -1920,6 +1920,9 @@ google = [
 mistral = [
     { name = "mistralai" },
 ]
+openai = [
+    { name = "openai" },
+]
 
 [[package]]
 name = "pydantic-core"
@@ -2804,7 +2807,8 @@ dependencies = [
     { name = "langchain-experimental" },
     { name = "langchain-text-splitters" },
     { name = "nltk" },
-    { name = "pydantic-ai-slim", extra = ["google", "mistral"] },
+    { name = "openai" },
+    { name = "pydantic-ai-slim", extra = ["google", "mistral", "openai"] },
     { name = "pymilvus" },
     { name = "pytest" },
     { name = "python-dotenv" },
@@ -2846,9 +2850,10 @@ requires-dist = [
     { name = "langchain-text-splitters", specifier = ">=0.3.11" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11.1" },
     { name = "nltk", specifier = ">=3.9.1" },
+    { name = "openai", specifier = ">=1.108.1" },
     { name = "openai", marker = "extra == 'llm'", specifier = ">=1.40.0" },
     { name = "pdfminer-six", marker = "extra == 'parse'", specifier = ">=20221105" },
-    { name = "pydantic-ai-slim", extras = ["google", "mistral"] },
+    { name = "pydantic-ai-slim", extras = ["google", "mistral", "openai"] },
     { name = "pymilvus", specifier = ">=2.6.2" },
     { name = "pymupdf", marker = "extra == 'parse'", specifier = ">=1.24.9" },
     { name = "pytest", specifier = ">=8.4.2" },
