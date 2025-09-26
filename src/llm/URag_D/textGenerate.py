@@ -28,56 +28,38 @@ class MyDeps:
 
 def build_prompt(ctx: RunContext[MyDeps])->str:
     data_json = json.dumps(ctx.deps.listChunks, ensure_ascii=False)
-    return """You are a specialist in generating data, you can change a json file including
-    chunks to an other json file with a meaningful sentence from each given chunk following these rules:
-    **RULES** 
-    1. The output must have json schema. (list of dictionaries)
-    2. The value must be a dictionary with "original"(key) and "transformed"(value).
-    3. Return strictly JSON, without any Markdown code fences.
+    # Highlight: The prompt has been updated to include instructions for generating a 'headline'.
+    return """You are a specialist in generating data. Your task is to transform a JSON file of text chunks into another JSON file. For each chunk, you will create a meaningful sentence and a concise headline.
+
+    **RULES** 1. The output must be a valid JSON schema (a list of dictionaries).
+    2. Each dictionary in the list must contain three keys: "original", "transformed", and "headline".
+    3. The "headline" should be a very short title (under 7 words) that captures the core idea of the chunk.
+    4. Return strictly JSON, without any Markdown code fences or other text.
 
     **Example**
     Given input:
         {
         "chunks": [
-                "The solar system consists of the Sun",
-                "and all the celestial bodies that orbit it,",
-                "including planets, moons, asteroids, and comets.",
-                "Scientists study these objects",
-                "to understand the formation and evolution",
-                "of our cosmic neighborhood."
+                "The solar system consists of the Sun and all the celestial bodies that orbit it, including planets, moons, asteroids, and comets.",
+                "Scientists study these objects to understand the formation and evolution of our cosmic neighborhood."
             ]
         }
     Corrected output:
         [
             {
-            "original": "The solar system consists of the Sun",
-            "transformed": "The solar system is made up of the Sun as its central star."
+                "original": "The solar system consists of the Sun and all the celestial bodies that orbit it, including planets, moons, asteroids, and comets.",
+                "transformed": "The solar system is composed of the Sun as its central star, along with all celestial bodies like planets, moons, and comets that revolve around it.",
+                "headline": "Components of the Solar System"
             },
             {
-            "original": "and all the celestial bodies that orbit it,",
-            "transformed": "It also includes all the celestial bodies that revolve around the Sun."
-            },
-            {
-            "original": "including planets, moons, asteroids, and comets.",
-            "transformed": "These celestial bodies include planets, moons, asteroids, and comets."
-            },
-            {
-            "original": "Scientists study these objects",
-            "transformed": "Scientists carefully observe and study these objects"
-            },
-            {
-            "original": "to understand the formation and evolution",
-            "transformed": "to gain insights into how the solar system formed and evolved over time"
-            },
-            {
-            "original": "of our cosmic neighborhood.",
-            "transformed": "and to better understand the structure of our cosmic neighborhood."
+                "original": "Scientists study these objects to understand the formation and evolution of our cosmic neighborhood.",
+                "transformed": "To gain insights into the formation and evolution of our cosmic neighborhood, scientists carefully observe and study these various objects.",
+                "headline": "Scientific Study of Celestial Bodies"
             }
         ]
     ****
 
-    You will be given a string with json format. Generating it following the above rules and making an output
-    with string in json format.
+    You will be given a string in JSON format. Generate a new JSON string following the above rules.
 
     Your input is:
     """ + data_json

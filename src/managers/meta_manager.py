@@ -51,7 +51,9 @@ class FAQGeneratorAdapter(IFaqGenerator):
         roots: List[Dict[str, Any]] = []
         for ch in augmented_chunks:
             # chọn text tốt nhất để extract Q/A (ưu tiên augmented)
-            text = ch.get("transformed") or ch.get("text") or ch.get("original") or ""
+            headline = (ch.get("metadata") or {}).get("headline", "")
+            content = ch.get("transformed") or ch.get("text") or ch.get("original") or ""   
+            text = f"[Tiêu đề tóm tắt: {headline}]\n\n{content}" if headline else content
             if not isinstance(text, str) or not text.strip():
                 continue
 

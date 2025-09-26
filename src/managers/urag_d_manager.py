@@ -258,10 +258,13 @@ class URagDManager:
         # 4) Embed
         emb_inputs: List[Dict[str, Any]] = []
         for a in self._augmented:
+            headline = a.get("headline", "")
             emb_inputs.append({
                 "text": a["transformed"],
                 "source": a["doc_id"],
-                "metadata": {"chunk_id": a["chunk_id"], "original": a["original"]},
+                "metadata": {"chunk_id": a["chunk_id"],
+                              "original": a["original"],
+                              "headline": headline},
                 "ts": now_ts
             })
 
