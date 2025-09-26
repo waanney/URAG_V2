@@ -23,6 +23,7 @@ dependencies = [
   "langchain-community>=0.3.29",
   "langchain-experimental>=0.3.4",
   "openai>=1.108.1",
+  "streamlit>=1.50.0",
 ]
 
 [project.optional-dependencies]

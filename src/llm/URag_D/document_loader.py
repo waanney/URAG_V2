@@ -4,12 +4,10 @@ from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 import json
+import csv
+import hashlib
 
-# LangChain Document type (compatible across versions)
-try:
-    from langchain_core.documents import Document  # LC >= 0.2
-except Exception:  # pragma: no cover
-    from langchain.schema import Document  # Older LC
+from langchain_core.documents import Document  # LC >= 0.2
 
 # Individual loaders
 from langchain_community.document_loaders import (
@@ -218,3 +216,82 @@ class DocLoaderLC:
             except Exception:
                 pass
         return out
+    
+    def load_csv_contexts(
+        self,
+        csv_path: str,
+        context_col: Optional[str] = None,
+        id_col: Optional[str] = None,
+        source_col: Optional[str] = None,
+        min_len: int = 5,
+    ) -> List[Document]:
+        """
+        Đọc 1 CSV, lấy mỗi dòng một 'context' -> Document-like:
+        - context_col: tên cột chứa ngữ cảnh; nếu None, auto-detect: ['context','content','text','body','passage']
+        - id_col: nếu có, dùng làm doc_id (ghi vào metadata['doc_id'])
+        - source_col: nếu có, ghi vào metadata['source']
+        """
+        p = Path(csv_path)
+        if not p.exists():
+            return []
+
+        # Ưu tiên delimiter cấu hình; nếu không, sniff
+        delim = self.cfg.csv_delimiter or ","
+        try:
+            with p.open("r", encoding="utf-8", newline="") as fh:
+                sample = fh.read(4096)
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+            delim = dialect.delimiter or delim
+        except Exception:
+            pass
+
+        out: List[Document] = []
+        with p.open("r", encoding="utf-8", newline="") as fh:
+            reader = csv.DictReader(fh, delimiter=delim)
+            headers = reader.fieldnames or []
+
+            candidates = ["context", "content", "text", "body", "passage"]
+            def _pick_col(want: Optional[str], cands: List[str]) -> Optional[str]:
+                if want and want in headers:
+                    return want
+                low = {h.lower(): h for h in headers}
+                for c in cands:
+                    if c.lower() in low:
+                        return low[c.lower()]
+                return None
+
+            ctx_col = _pick_col(context_col, candidates)
+            if not ctx_col:
+                # fallback: nếu không có cột hợp lệ, trả rỗng
+                return []
+
+            for idx, row in enumerate(reader, start=1):
+                ctx = (row.get(ctx_col) or "").strip()
+                if len(ctx) < min_len:
+                    continue
+
+                doc_id = None
+                if id_col and id_col in row and row[id_col]:
+                    doc_id = str(row[id_col]).strip()
+                else:
+                    h = hashlib.md5()
+                    h.update(f"{csv_path}|{idx}|{ctx[:64]}".encode("utf-8", errors="ignore"))
+                    doc_id = f"csv_{h.hexdigest()[:16]}"
+
+                meta: Dict[str, Any] = {
+                    "file_path": str(p),
+                    "path": str(p),
+                    "row_index": idx,
+                    "context_col": ctx_col,
+                    "delimiter": delim,
+                    "doc_id": doc_id,
+                }
+                if source_col and source_col in row:
+                    meta["source"] = (row.get(source_col) or "").strip()
+
+                # Khởi tạo Document thật (nếu LangChain có), vẫn hợp type DocLike
+                doc = Document(page_content=ctx, metadata=meta)  # type: ignore[call-arg]
+                out.append(doc)
+        return out
+
+    

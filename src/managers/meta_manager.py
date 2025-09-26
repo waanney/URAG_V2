@@ -254,3 +254,120 @@ class MetaManager:
         else:
             raise ValueError("input_type must be one of: 'docs', 'faqs'")
 
+    # --- API 1: chạy từ tài liệu đã chuẩn hoá ---
+    def run_from_documents(self, documents: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        documents: List[{'doc_id': str, 'text': str, 'metadata': dict}]
+        Điều phối y hệt 'docs' flow nhưng bỏ bước đọc thư mục.
+        - Nếu URagDManager có run_pipeline_from_records(...) -> dùng trực tiếp.
+        - Ngược lại: fallback ghi tạm .txt rồi gọi run(..., 'docs').
+        """
+        t0 = time.time()
+        # Ưu tiên API trực tiếp nếu d_manager có
+        if hasattr(self.d_manager, "run_pipeline_from_records"):
+            d_resp = self.d_manager.run_pipeline_from_records(
+                documents=documents,
+                collection_base=self.cfg.collection_base,
+            )
+            augmented = self.d_manager.get_augmented_chunks() or []
+        else:
+            # Fallback: ghi ra thư mục tạm -> dùng run(..., 'docs')
+            import tempfile, shutil
+            from pathlib import Path
+            tmpdir = Path(tempfile.mkdtemp(prefix="mm_docs_"))
+            try:
+                for d in documents:
+                    did = d.get("doc_id") or str(uuid.uuid4())
+                    with open(tmpdir / f"{did}.txt", "w", encoding="utf-8") as f:
+                        f.write(d.get("text") or "")
+                d_resp = self.d_manager.run_pipeline(
+                    root_dir=str(tmpdir),
+                    collection_base=self.cfg.collection_base
+                )
+                augmented = self.d_manager.get_augmented_chunks() or []
+            finally:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+
+        if not augmented:
+            return {
+                "status": "success",
+                "input_type": "docs(records)",
+                "total_sec": round(time.time() - t0, 2),
+                "d_manager_summary": d_resp,
+                "f_manager_summary": "skipped_no_augmented",
+            }
+
+        augmented_dicts: List[Dict[str, Any]] = [dict(x) for x in augmented]
+        f_res = self.f_manager.run_from_augmented(
+            augmented=augmented_dicts,
+            collection_base=self.cfg.collection_base,
+            paraphrase_n=self.cfg.faq_paraphrase_n,
+            metric=self.cfg.metric_type,
+        )
+        return {
+            "status": "success",
+            "input_type": "docs(records)",
+            "total_sec": round(time.time() - t0, 2),
+            "d_manager_summary": d_resp,
+            "f_manager_summary": f_res.get("summary"),
+            "indexing_responses": {"docs": d_resp, "faqs": f_res.get("resp", {})},
+        }
+
+    # --- API 2: chạy từ FAQ roots đã chuẩn hoá ---
+    def run_from_faqs(self, roots: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        roots: List[{'question': str, 'answer': str, ...}]
+        Enrich (paraphrase Q, giữ A) -> embed & index FAQ.
+        """
+        t0 = time.time()
+        if not roots:
+            return {"status": "error", "message": "Empty roots."}
+
+        f_res = self.f_manager.run_from_roots(
+            roots=roots,
+            collection_base=self.cfg.collection_base,
+            paraphrase_n=self.cfg.faq_paraphrase_n,
+            metric=self.cfg.metric_type,
+        )
+        return {
+            "status": "success",
+            "input_type": "faqs(roots)",
+            "total_sec": round(time.time() - t0, 2),
+            "f_manager_summary": f_res.get("summary"),
+            "indexing_responses": {"faqs": f_res.get("resp", {})},
+        }
+
+    # --- API 3: tiện ích CSV cột `context` ---
+    def run_from_csv_contexts(
+        self,
+        csv_path: str,
+        context_col: str = "context",
+        id_col: Optional[str] = None,
+        min_len: int = 5,
+        default_source: str = "csv_src",
+    ) -> Dict[str, Any]:
+        """
+        Đọc 1 CSV, lấy cột `context` xem như tài liệu -> chạy full docs pipeline.
+        - Yêu cầu DocLoaderLC có load_csv_contexts() và to_augmented_inputs().
+        - Bảo toàn 'doc_id' theo từng dòng (ưu tiên metadata.doc_id).
+        """
+        print(f'Processing {id_col if id_col else 'no id !!!!!'}')
+
+        if not os.path.exists(csv_path):
+            raise FileNotFoundError(csv_path)
+
+        # 1) Đọc CSV thành Document-like
+        docs_lc = self.doc_loader.load_csv_contexts(
+            csv_path=csv_path,
+            context_col=context_col,
+            id_col=id_col,
+            source_col=None,
+            min_len=min_len,
+        )
+        # 2) Chuẩn hoá -> [{doc_id,text,metadata}]
+        augmented = self.doc_loader.to_augmented_inputs(docs_lc, default_source=default_source)
+        for x in augmented:
+            x["doc_id"] = x.get("metadata", {}).get("doc_id", x["doc_id"])
+
+        # 3) Chạy như records
+        return self.run_from_documents(augmented)
