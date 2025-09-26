@@ -35,7 +35,7 @@ def ensure_kernel_active():
         + else -> báo lỗi hướng dẫn set ENV
     """
     cfg = KERNEL.load_active_config()
-    if cfg is not None:
+    if cfg is not None: 
         print(f"[KERNEL] Loaded active config: provider={cfg.provider}, model={cfg.model}")
         return
 
@@ -97,7 +97,7 @@ def main():
         collection_base="rag_meta_demo",
         faq_min_pairs=3,
         faq_paraphrase_n=2,
-        language="vi",
+        language="default",
     )
     mm = MetaManager(cfg)
 

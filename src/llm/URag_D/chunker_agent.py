@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field, field_validator
 # LangChain
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_core.embeddings import Embeddings  # <-- interface LangChain
+from langchain_core.embeddings import Embeddings  
 
 from src.embedding.embedding_agent import EmbConfig, EmbedderAgent
 # --- Adapter: biến EmbedderAgent thành LangChain Embeddings interface ---

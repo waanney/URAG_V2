@@ -11,8 +11,7 @@ from __future__ import annotations
 from typing import List, Dict, Any, Optional, Literal
 from pydantic import BaseModel, Field, field_validator
 from pathlib import Path
-from dataclasses import asdict
-
+import os
 # Tái dùng loader hiện có của bạn
 try:
     from src.llm.URag_D.document_loader import DocLoaderLC, DocLoaderConfig
@@ -64,7 +63,7 @@ class FaqItem(BaseModel):
     ts: Optional[int] = None
 
 class DLRequest(BaseModel):
-    mode: Literal["normal", "faq", "both"] = "normal"
+    mode: Literal["normal", "faq", "both", "csv"] = "normal"
     root_dir: Optional[str] = Field(default=None, description="Thư mục gốc chứa tài liệu thường")
     faq_path: Optional[str] = Field(default=None, description="Đường dẫn file JSON/JSONL FAQ")
     default_source: str = "doc_src"
@@ -113,9 +112,13 @@ class DocumentLoaderAgent:
         faqs: List[FaqItem] = []
         meta: Dict[str, Any] = {"mode": req.mode}
 
+        if req.mode == "csv":
+            raise ValueError("mode='csv' không dùng ở run(); hãy gọi load_context_csv_as_docs(...)")
+
         if req.mode in ("normal", "both"):
             docs_lc = self._loader.load_normal_docs(req.root_dir or ".")
             aug = self._loader.to_augmented_inputs(docs_lc, default_source=req.default_source)
+            
             if req.limit_docs is not None and req.limit_docs >= 0:
                 aug = aug[: req.limit_docs]
             documents = [DocRecord(**x) for x in aug]
@@ -127,3 +130,55 @@ class DocumentLoaderAgent:
             meta["num_faqs"] = len(faqs)
 
         return DLResponse(documents=documents, faqs=faqs, meta=meta)
+        
+    def load_context_csv_as_docs(
+        self,
+        csv_path: str,
+        context_col: str = "context",
+        id_col: Optional[str] = None,
+        min_len: int = 5,
+        default_source: str = "csv_src",
+    ) -> DLResponse:
+        """
+        Đọc 1 CSV, lấy đúng cột `context` làm nội dung tài liệu.
+        Mỗi dòng -> 1 DocRecord(text=context, doc_id sinh từ id_col hoặc hash).
+        """
+        docs_lc = self._loader.load_csv_contexts(
+            csv_path=csv_path,
+            context_col=context_col,
+            id_col=id_col,
+            source_col=None,    
+            min_len=min_len,
+        )
+        aug = self._loader.to_augmented_inputs(docs_lc, default_source=default_source)
+        for x in aug:
+            x["doc_id"] = x.get("metadata", {}).get("doc_id", x["doc_id"])
+        documents = [DocRecord(**x) for x in aug]
+        meta = {
+            "mode": "csv-context",
+            "csv_path": os.fspath(csv_path),
+            "num_documents": len(documents),
+            "context_col": context_col,
+        }
+        return DLResponse(documents=documents, faqs=[], meta=meta)
+
+    # --- NEW (tuỳ chọn): chỉ lấy list[DocRecord] cho tiện tái dùng ---
+    def load_context_csv_records(
+        self,
+        csv_path: str,
+        context_col: str = "context",
+        id_col: Optional[str] = None,
+        min_len: int = 5,
+        default_source: str = "csv_src",
+    ) -> List[DocRecord]:
+        docs_lc = self._loader.load_csv_contexts(
+            csv_path=csv_path,
+            context_col=context_col,
+            id_col=id_col,
+            source_col=None,
+            min_len=min_len,
+        )
+        aug = self._loader.to_augmented_inputs(docs_lc, default_source=default_source)
+        for x in aug:
+            x["doc_id"] = x.get("metadata", {}).get("doc_id", x["doc_id"])
+        return [DocRecord(**x) for x in aug]

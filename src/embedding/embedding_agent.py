@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Literal, Optional, Tuple
 from dataclasses import dataclass
 
+import torch
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
@@ -12,7 +13,7 @@ Language = Literal["auto", "vi", "default"]  # "auto" dự phòng cho tương la
 @dataclass
 class EmbConfig:
     # Model mặc định (đa ngôn ngữ, dim=384)
-    model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
+    model_name: str = "Alibaba-NLP/gte-multilingual-base"
     # Model tiếng Việt chuyên dụng
     vi_model_name: str = "dangvantuan/vietnamese-embedding"
 
@@ -29,6 +30,10 @@ class EmbedderAgent:
     def __init__(self, cfg: EmbConfig):
         self.cfg = cfg
 
+        if self.cfg.device is None:
+            self.cfg.device = "cuda" if torch.cuda.is_available() else "cpu"
+            print(f"🚀 Device not specified. Auto-detected and using: {self.cfg.device}")
+
         # Chốt model theo language ngay từ đầu để đảm bảo dimension nhất quán
         chosen_model = (
             self.cfg.vi_model_name
@@ -36,10 +41,7 @@ class EmbedderAgent:
             else self.cfg.model_name
         )
 
-        if self.cfg.device is None:
-            self.model = SentenceTransformer(chosen_model)
-        else:
-            self.model = SentenceTransformer(chosen_model, device=self.cfg.device)
+        self.model = SentenceTransformer(chosen_model, device=self.cfg.device, trust_remote_code=True)
 
         # cache dim
         self._dim: Optional[int] = None

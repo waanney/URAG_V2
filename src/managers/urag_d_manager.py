@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Protocol, Literal, Union, cast, TypedDict
+from typing import Any, Dict, List, Optional, Tuple, Protocol, Literal, Union, cast, TypedDict, Set
 import os, json, time
 
 # ===== Doc Loader Agent (wrapper Pydantic) =====
@@ -312,7 +312,56 @@ class URagDManager:
         self.augment_chunks(triples)
         return self.embed_and_index(collection_base or self.cfg.milvus_collection_base)
 
+    def run_pipeline_from_records(
+        self,
+        documents: List[Dict[str, Any]],
+        collection_base: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        One-shot (records): [{doc_id, text, metadata}] -> chunk -> augment -> embed -> index.
+        Trả về phản hồi indexing của __doc.
+        """
+        if not documents:
+            return {"status": "empty", "message": "No documents provided."}
 
+        # 1) Chuẩn hoá đầu vào (khoan tạo DocRecord; chunker chỉ cần text, doc_id)
+        norm_docs: List[Tuple[str, str, Dict[str, Any]]] = []  # (doc_id, text, metadata)
+        for i, d in enumerate(documents):
+            # d có thể là pydantic DocRecord (.doc_id/.text) hoặc dict
+            doc_id = (getattr(d, "doc_id", None) or d.get("doc_id") or f"rec_{i}")
+            text   = (getattr(d, "text",   None) or d.get("text") or "").strip()
+            meta   = (getattr(d, "metadata", None) or d.get("metadata") or {})
+            if not text:
+                continue
+            norm_docs.append((str(doc_id), text, dict(meta)))
+
+        if not norm_docs:
+            return {"status": "empty", "message": "All documents were empty."}
+
+        # (tuỳ chọn) cảnh báo trùng doc_id
+        seen: Set[str] = set()
+        dedup_docs: List[Tuple[str, str, Dict[str, Any]]] = []
+        for i, (doc_id, text, meta) in enumerate(norm_docs):
+            if doc_id in seen:
+                # đảm bảo uniqueness để id_join=doc_id__chunk_id không đè nhau
+                doc_id = f"{doc_id}__dup{i}"
+                meta = {**meta, "dedup": True}
+            seen.add(doc_id)
+            dedup_docs.append((doc_id, text, meta))
+        norm_docs = dedup_docs
+
+        # 2) Chunk
+        triples: List[Tuple[str, str, str]] = []  # (doc_id, chunk_id, text)
+        for doc_id, full_text, _meta in norm_docs:
+            resp = self.chunker.chunk(SemanticChunkerRequest(text=full_text, doc_id=doc_id))
+            for c in resp.chunks:
+                triples.append((c.doc_id, c.chunk_id, c.text))
+
+        # 3) Augment
+        self.augment_chunks(triples)
+
+        # 4) Embed + Index vào __doc
+        return self.embed_and_index(collection_base or self.cfg.milvus_collection_base)
 # ===================== Demo =====================
 if __name__ == "__main__":
     cfg = DManagerConfig(

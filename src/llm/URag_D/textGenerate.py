@@ -13,12 +13,12 @@ loaded = KERNEL.load_active_config()
 # 2) Nếu chưa có active_config thì ép Google mặc định (bạn có thể bỏ khối này nếu UI luôn set)
 if loaded is None:
     KERNEL.set_active_config(
-        GoogleConfig(model=os.getenv("GOOGLE_MODEL", "gemini-1.5-flash"))
+        GoogleConfig(model=os.getenv("GOOGLE_MODEL", "gemini-2.0-flash"))
     )
 
 # 3) Lấy model đang active; cho phép override api_key/model_name qua ENV
 model = KERNEL.get_active_model(
-    model_name=os.getenv("GOOGLE_MODEL", "gemini-1.5-flash"),
+    model_name=os.getenv("GOOGLE_MODEL", "gemini-2.0-flash"),
     api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 )
 
