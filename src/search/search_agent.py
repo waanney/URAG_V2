@@ -102,7 +102,7 @@ class SearchAgent:
         self.indexer = indexer or IndexingAgent(i_cfg or AgentConfig())
 
         # Lấy model do UI/ENV chọn qua KERNEL, tạo pydantic-ai Agent với system prompt cố định
-        llm_model = KERNEL.get_active_model()
+        llm_model = KERNEL.get_active_model(model_name="gemini-2.0-flash")
         self._llm_agent = Agent(llm_model, system_prompt=self.s_cfg.llm_system_instruction)
 
         # khớp suffix từ IndexingAgent để tránh lệch tên

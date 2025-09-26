@@ -287,7 +287,7 @@ if __name__ == "__main__":
     # Ví dụ UI chọn Google
     KERNEL.set_active_config(GoogleConfig())
     try:
-        gm = KERNEL.get_active_model("gemini-1.5-flash")
+        gm = KERNEL.get_active_model("gemini-2.0-flash")
         print("Created google model:", type(gm))
     except Exception as e:
         print("Google skipped:", e)

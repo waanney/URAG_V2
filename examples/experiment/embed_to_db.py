@@ -10,7 +10,7 @@ import os, json
 from typing import List, Dict, Any
 
 # ======================== CONFIG ========================
-CSV_PATH       = "datasets/train_multihop.csv"  # <-- ĐƯỜNG DẪN CSV CỦA BẠN
+CSV_PATH       = "datasets/test.csv"  # <-- ĐƯỜNG DẪN CSV CỦA BẠN
 CONTEXT_COL    = "context"               # tên cột mang nội dung
 ID_COL         = "id"                    # cột id (optional, để None nếu không có)
 MIN_LEN        = 5                       # bỏ qua context quá ngắn
