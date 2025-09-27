@@ -10,11 +10,11 @@ import os, json
 from typing import List, Dict, Any
 
 # ======================== CONFIG ========================
-CSV_PATH       = "datasets/train_multihop.csv"  # <-- ĐƯỜNG DẪN CSV CỦA BẠN
+CSV_PATH       = "datasets/test.csv"  # <-- ĐƯỜNG DẪN CSV CỦA BẠN
 CONTEXT_COL    = "context"               # tên cột mang nội dung
 ID_COL         = "id"                    # cột id (optional, để None nếu không có)
 MIN_LEN        = 5                       # bỏ qua context quá ngắn
-COLLECTION     = "viquad_demo_1"      # tên base của collection Milvus
+COLLECTION     = "viquad_test_2"      # tên base của collection Milvus
 LANGUAGE       = "default"               # "vi" | "default"
 DEFAULT_SOURCE = "csv_src"
 
@@ -22,12 +22,19 @@ DEFAULT_SOURCE = "csv_src"
 # os.environ["GEMINI_API_KEY"] = "sk-..."
 
 # ===================== BOOT LLM KERNEL =====================
-from src.llm.llm_kernel import KERNEL, GoogleConfig, OllamaConfig
+from src.llm.llm_kernel import KERNEL, GoogleConfig, OllamaConfig, OpenAIConfig
 
 def ensure_kernel_active():
-    cfg = KERNEL.load_active_config()
-    if cfg is not None:
-        print(f"[KERNEL] Loaded active config: provider={cfg.provider}, model={cfg.model}")
+    loaded = KERNEL.load_active_config()
+    if loaded is not None:
+        print(f"[KERNEL] Loaded active config: provider={loaded.provider}, model={loaded.model}")
+        return
+    if os.getenv("OPENAI_API_KEY"):
+        model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        api_key = os.getenv("OPENAI_API_KEY")
+        base_url = os.getenv("OPENAI_BASE_URL")  # optional
+        KERNEL.set_active_config(OpenAIConfig(model=model_name, api_key=api_key)) 
+        print(f"[KERNEL] Active=OpenAI (model={model_name}{', via base_url' if base_url else ''})")
         return
     if os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
         model_name = os.getenv("GOOGLE_MODEL", "gemini-2.0-flash")

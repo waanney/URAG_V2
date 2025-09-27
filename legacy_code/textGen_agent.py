@@ -20,10 +20,8 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Iterable
 from dataclasses import dataclass
 import json
-from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
-load_dotenv()
 # LLM kernel (bạn đã có)
 from src.llm.llm_kernel import KERNEL, GoogleConfig
 

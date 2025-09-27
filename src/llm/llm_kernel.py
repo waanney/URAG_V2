@@ -44,13 +44,15 @@ from pydantic_ai.models import Model as PAModel
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.providers.google import GoogleProvider
 from pydantic_ai.providers.ollama import OllamaProvider
+from pydantic_ai.providers.openai import OpenAIProvider        
+from pydantic_ai.models.openai import OpenAIChatModel
 
 log = logging.getLogger(__name__)
 
 # =====================================
 # Config schemas (nhẹ, expandable)
 # =====================================
-ProviderName = Literal["google", "ollama"]
+ProviderName = Literal["google", "ollama", "openai"]
 
 class BaseKernelConfig(BaseModel):
     provider: ProviderName | None = Field(default=None, description="Tên provider. Nếu None sẽ quyết định sau.")
@@ -64,7 +66,11 @@ class OllamaConfig(BaseKernelConfig):
     provider: ProviderName | None = Field(default="ollama")
     base_url: str | None = Field(default=None, description="Mặc định http://localhost:11434")
 
-LLMConfig = Union[GoogleConfig, OllamaConfig]
+class OpenAIConfig(BaseKernelConfig):                  # NEW
+    provider: ProviderName | None = Field(default="openai")
+    api_key: str | None = Field(default=None, description="ENV: OPENAI_API_KEY")
+
+LLMConfig = Union[GoogleConfig, OllamaConfig, OpenAIConfig]
 
 # =====================================
 # Kernel (deferred-binding + active selection)
@@ -90,6 +96,7 @@ class LLMKernel:
         self._registry: Dict[str, Callable[[str, Dict[str, object]], PAModel]] = {
             "google": self._factory_google,
             "ollama": self._factory_ollama,
+            "openai": self._factory_openai,
         }
 
     # ---------- configuration APIs ----------
@@ -102,7 +109,11 @@ class LLMKernel:
         """Chỉ định provider mặc định (khởi tạo config rỗng)."""
         if provider not in self._registry:
             raise ValueError(f"Provider '{provider}' chưa được hỗ trợ.")
-        cfg = GoogleConfig() if provider == "google" else OllamaConfig()
+        cfg = (
+            GoogleConfig() if provider == "google"
+            else OllamaConfig() if provider == "ollama"
+            else OpenAIConfig()         
+        )
         self.configure(cfg)
 
     def set_active_config(self, config: LLMConfig) -> None:
@@ -148,6 +159,8 @@ class LLMKernel:
                 cfg = GoogleConfig.model_validate(data)
             elif prov == "ollama":
                 cfg = OllamaConfig.model_validate(data)
+            elif prov == "openai":  
+                cfg = OpenAIConfig.model_validate(data)
             else:
                 raise ValidationError(f"provider không hợp lệ: {prov}")
         except Exception as e:
@@ -182,9 +195,11 @@ class LLMKernel:
                 provider = "ollama"
             elif os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
                 provider = "google"
+            elif os.getenv("OPENAI_API_KEY"):               
+                provider = "openai"
             else:
                 provider = "ollama"  # local-friendly default
-                log.info("Provider chưa đặt; mặc định 'ollama'. Dùng USE_OLLAMA=0 và set GEMINI_API_KEY để ưu tiên Google.")
+                log.info("Provider chưa đặt; mặc định 'ollama'. Dùng USE_OLLAMA=0 và set GEMINI_API_KEY hoặc OPENAI_API_KEY để ưu tiên cloud.")
 
         # Model name
         final_model = model_name or (getattr(cfg, "model", None) if cfg else None)
@@ -199,8 +214,10 @@ class LLMKernel:
         elif isinstance(cfg, OllamaConfig):
             if cfg.base_url is not None:
                 base_params["base_url"] = cfg.base_url
-
-        base_params.update(overrides)  # ưu tiên overrides
+        elif isinstance(cfg, OpenAIConfig):                   
+            if cfg.api_key is not None:
+                base_params["api_key"] = cfg.api_key
+        base_params.update(overrides)  
         return provider, final_model, base_params
 
     # ---------- factories (provider‑specific) ----------
@@ -223,6 +240,14 @@ class LLMKernel:
 
         base_url = str(params.get("base_url") or os.getenv("OLLAMA_BASE_URL") or "http://localhost:11434")
         prov = OllamaProvider(base_url=base_url)
+        return OpenAIChatModel(model_name, provider=prov)
+
+    @staticmethod
+    def _factory_openai(model_name: str, params: Dict[str, object]) -> PAModel:  
+        api_key = params.get("api_key") or os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OpenAI provider: thiếu API key (OPENAI_API_KEY hoặc truyền api_key=...).")
+        prov = OpenAIProvider(api_key=str(api_key))
         return OpenAIChatModel(model_name, provider=prov)
 
     def load_config_from_yaml(self, path: str = "config/kernel_config.yaml") -> Optional[LLMConfig]:
@@ -258,6 +283,8 @@ class LLMKernel:
                 cfg = GoogleConfig(**config_data)
             elif default_provider == "ollama":
                 cfg = OllamaConfig(**config_data)
+            elif default_provider == "openai":                    
+                cfg = OpenAIConfig(**config_data)
             else:
                 log.error(f"Provider '{default_provider}' không được hỗ trợ.")
                 return None
@@ -285,12 +312,12 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     # Ví dụ UI chọn Google
-    KERNEL.set_active_config(GoogleConfig())
+    KERNEL.set_active_config(OpenAIConfig())
     try:
-        gm = KERNEL.get_active_model("gemini-1.5-flash")
-        print("Created google model:", type(gm))
+        gm = KERNEL.get_active_model("gpt-4o-mini")
+        print("Created openai model:", type(gm))
     except Exception as e:
-        print("Google skipped:", e)
+        print("openai skipped:", e)
 
     # Ví dụ UI chọn Ollama
     KERNEL.set_active_config(OllamaConfig(base_url="http://localhost:11434"))

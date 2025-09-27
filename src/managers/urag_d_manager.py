@@ -36,14 +36,14 @@ class DManagerConfig:
     limit_docs: Optional[int] = None
 
     # Chunker
-    lang: Literal["default", "vi", "en"] = "vi"
+    lang: Literal["default", "vi", "en"] = "default"
     buffer_size: int = 1
     min_chunk_size: Optional[int] = None
     number_of_chunks: Optional[int] = None
 
     # Embedding
-    emb_language: Literal["default", "vi", "en"] = "vi"
-    emb_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
+    emb_language: Literal["default", "vi", "en"] = "default"
+    emb_model_name: str = "BAAI/bge-m3"
     emb_vi_model_name: str = "dangvantuan/vietnamese-embedding"
     emb_device: Optional[str] = None
     metric: Literal["COSINE", "IP", "L2"] = "COSINE"
@@ -258,10 +258,13 @@ class URagDManager:
         # 4) Embed
         emb_inputs: List[Dict[str, Any]] = []
         for a in self._augmented:
+            headline = a.get("headline", "")
             emb_inputs.append({
                 "text": a["transformed"],
                 "source": a["doc_id"],
-                "metadata": {"chunk_id": a["chunk_id"], "original": a["original"]},
+                "metadata": {"chunk_id": a["chunk_id"],
+                              "original": a["original"],
+                              "headline": headline},
                 "ts": now_ts
             })
 
