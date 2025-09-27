@@ -20,6 +20,22 @@ from src.llm.URag_D.document_loader import DocLoaderLC
 from src.llm.URag_F.FAQ import FAQAgent, FAQPair
 
 
+def _ts() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+def _sec(ms: float) -> str:
+    return f"{ms:.2f}s"
+
+class _StepTimer:
+    def __init__(self, name: str):
+        self.name = name
+        self.t0 = time.time()
+        print(f"[{_ts()}] ▶ START {self.name}")
+    def end(self, extra: str = ""):
+        dt = time.time() - self.t0
+        print(f"[{_ts()}] ◀ END   {self.name} in {_sec(dt)} {extra}".rstrip())
+
+
 # ======================= FAQ Generator Adapter =======================
 
 class FAQGeneratorAdapter(IFaqGenerator):
@@ -152,7 +168,9 @@ class MetaManager:
 
         # Embedder cho FManager (DManager tự dùng embedder riêng nội bộ)
         emb_cfg = EmbConfig(
-            language=("vi" if self.cfg.language.lower() == "vi" else "default"),
+            model_name=self.cfg.d_manager_config.emb_model_name,         
+            vi_model_name=self.cfg.d_manager_config.emb_vi_model_name,
+            language="default",
             metric=self.cfg.metric_type,
         )
         self.embedder: IEmbedder = EmbedderAgent(emb_cfg)
@@ -209,15 +227,16 @@ class MetaManager:
 
             # 🔧 Chuyển TypedDict -> Dict[str, Any] để Pylance im lặng
             augmented_dicts: List[Dict[str, Any]] = [dict(x) for x in augmented]
-
+            print(f"[MetaManager] augmented_chunks = {len(augmented)} for base={self.cfg.collection_base}")  # DEBUG
             # Step 2: Augmented -> FManager
+            print(f"[MetaManager] call FManager.run_from_augmented(base={self.cfg.collection_base})")  # DEBUG
             f_res = self.f_manager.run_from_augmented(
                 augmented=augmented_dicts,
                 collection_base=self.cfg.collection_base,
                 paraphrase_n=self.cfg.faq_paraphrase_n,
                 metric=self.cfg.metric_type,
             )
-
+            print(f"[MetaManager] FManager summary = {f_res.get('summary')}, resp keys = {list((f_res.get('resp') or {}).keys())}")  # DEBUG
             return {
                 "status": "success",
                 "input_type": "docs",
@@ -353,7 +372,6 @@ class MetaManager:
         - Yêu cầu DocLoaderLC có load_csv_contexts() và to_augmented_inputs().
         - Bảo toàn 'doc_id' theo từng dòng (ưu tiên metadata.doc_id).
         """
-        print(f'Processing {id_col if id_col else 'no id !!!!!'}')
 
         if not os.path.exists(csv_path):
             raise FileNotFoundError(csv_path)
@@ -370,6 +388,11 @@ class MetaManager:
         augmented = self.doc_loader.to_augmented_inputs(docs_lc, default_source=default_source)
         for x in augmented:
             x["doc_id"] = x.get("metadata", {}).get("doc_id", x["doc_id"])
+
+        total = len(augmented)
+        for i, x in enumerate(augmented, 1):
+            did = x.get("doc_id")
+            print(f"[MetaManager] Processing {i}/{total} doc_id={did}")
 
         # 3) Chạy như records
         return self.run_from_documents(augmented)

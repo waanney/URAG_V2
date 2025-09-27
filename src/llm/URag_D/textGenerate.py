@@ -1,26 +1,10 @@
 from pydantic_ai import Agent, RunContext
-from src.llm.llm_kernel import KERNEL, GoogleConfig
+from src.llm.llm_kernel import KERNEL
 from dataclasses import dataclass
-from dotenv import load_dotenv
 import os
 import json
 
-load_dotenv()
-
-# 1) Thử dùng cấu hình đã lưu (nếu UI từng lưu bằng KERNEL.save_active_config)
-loaded = KERNEL.load_active_config()
-
-# 2) Nếu chưa có active_config thì ép Google mặc định (bạn có thể bỏ khối này nếu UI luôn set)
-if loaded is None:
-    KERNEL.set_active_config(
-        GoogleConfig(model=os.getenv("GOOGLE_MODEL", "gemini-2.0-flash"))
-    )
-
-# 3) Lấy model đang active; cho phép override api_key/model_name qua ENV
-model = KERNEL.get_active_model(
-    model_name=os.getenv("GOOGLE_MODEL", "gemini-2.0-flash"),
-    api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-)
+model = KERNEL.get_active_model()
 
 @dataclass
 class MyDeps:

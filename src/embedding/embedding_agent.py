@@ -13,7 +13,7 @@ Language = Literal["auto", "vi", "default"]  # "auto" dự phòng cho tương la
 @dataclass
 class EmbConfig:
     # Model mặc định (đa ngôn ngữ, dim=384)
-    model_name: str = "Alibaba-NLP/gte-multilingual-base"
+    model_name: str = "BAAI/bge-m3"
     # Model tiếng Việt chuyên dụng
     vi_model_name: str = "dangvantuan/vietnamese-embedding"
 

@@ -34,7 +34,7 @@ class FAQList(BaseModel):
 
 class _GenOut(BaseModel):
     """Dạng đầu ra khi generate: list các tuple (q, a)."""
-    output: List[Tuple[str, str]]
+    output: List[FAQPair]
 
 class QuestionVariantsOut(BaseModel):
     """Dạng đầu ra khi enrich: chỉ danh sách câu hỏi mới (không có answer)."""
@@ -53,13 +53,12 @@ DOCUMENT:
 - Tạo ÍT NHẤT {min_pairs} cặp (question, answer).
 - Câu hỏi ngắn gọn, bám sát tài liệu; tránh trùng lặp.
 - Câu trả lời CHỈ dựa trên DOCUMENT; không suy diễn, không bịa.
-- Ưu tiên các mối quan tâm phổ biến (điểm sàn/điều kiện/điểm mốc/quy trình... nếu có trong document).
 
 # OUTPUT (JSON STRICT)
 {{
   "output": [
-    ["<question-1>", "<answer-1>"],
-    ["<question-2>", "<answer-2>"]
+    {{"question": "<question-1>", "answer": "<answer-1>"}},
+    {{"question": "<question-2>", "answer": "<answer-2>"}}
   ]
 }}
 """.strip()
@@ -73,7 +72,7 @@ Bạn là bộ máy ENRICH FAQ: chỉ tạo **biến thể câu hỏi** tự nhi
 - SEED_ANSWER: "{seed_a}"  # dùng để hiểu phạm vi/ý nghĩa; KHÔNG được tạo lại câu trả lời.
 
 # INSTRUCTIONS
-- Sinh ÍT NHẤT {n_variants} biến thể cách hỏi khác nhau cho người Việt (tự nhiên, rõ ràng).
+- Sinh ÍT NHẤT {n_variants} biến thể cách hỏi khác nhau (tự nhiên, rõ ràng).
 - Giữ NGUYÊN Ý NGHĨA như SEED_QUESTION; không mở rộng/thu hẹp phạm vi.
 - Không thêm điều kiện mới; không mơ hồ; không bịa.
 - Đa dạng kiểu hỏi: có/không, when/where/how, rút gọn, đảo cụm từ, đồng nghĩa, chính tả phổ biến.
@@ -125,14 +124,17 @@ class FAQAgent:
     # ---------- Helpers ----------
 
     @staticmethod
-    def _pairs_to_models(pairs: Iterable[Tuple[str, str]]) -> List[FAQPair]:
-        out: List[FAQPair] = []
-        for q, a in pairs:
-            q = (q or "").strip()
-            a = (a or "").strip()
+    def _pairs_to_models(pairs) -> List[FAQPair]:
+        out = []
+        for it in pairs:
+            if isinstance(it, FAQPair):
+                q, a = it.question.strip(), it.answer.strip()
+            else:
+                q, a = (it[0] or "").strip(), (it[1] or "").strip()
             if q and a:
                 out.append(FAQPair(question=q, answer=a))
         return out
+
 
     @staticmethod
     def _dedup(items: Iterable[FAQPair]) -> List[FAQPair]:
@@ -149,10 +151,9 @@ class FAQAgent:
     # ---------- Sync API ----------
 
     def generate(self, document: str) -> List[FAQPair]:
-        """Sinh FAQ gốc từ DOCUMENT."""
         prompt = PROMPT_GENERATE.format(document=document, min_pairs=self.min_pairs)
         res = self.gen_agent.run_sync(prompt)
-        base = self._pairs_to_models(res.output.output or [])
+        base: List[FAQPair] = res.output.output or []
         return self._dedup(base)
 
     def enrich(self, faqs: List[FAQPair]) -> List[FAQPair]:

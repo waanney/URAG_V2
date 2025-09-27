@@ -76,7 +76,7 @@ def main():
     KERNEL.set_active_config(GoogleConfig())  # ví dụ: dùng Gemini qua SDK pydantic-ai
     # 2) Cấu hình Search
     s_cfg = SearchConfig(
-        collection_base="viquad_demo_1", 
+        collection_base="viquad_test_2", 
         faq_top_k=5, doc_top_k=5,
         tFAQ=0.70, tDOC=0.60,
         metric="COSINE",
@@ -95,7 +95,7 @@ def main():
     agent = SearchAgent(s_cfg, e_cfg=e_cfg, i_cfg=i_cfg)
 
     # 4) Hỏi thử
-    q = ""
+    q = "Vấn đề về lĩnh vực y tế nào mà Hà Nội đang vấp phải tương tự như thành phố Hồ Chí Minh?"
     resp = agent.answer(q)
 
     
@@ -103,4 +103,4 @@ def main():
     print("[Tier]", resp.tier)
     print("[Answer]\n", resp.final_answer)
 if __name__ == "__main__":
-    delete()
+    main()

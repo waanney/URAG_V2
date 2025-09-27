@@ -57,7 +57,7 @@ class SemanticChunkerAgentConfig(BaseModel):
     # Chọn model theo ngôn ngữ
     language: Literal["default", "vi", "en"] = "default"
     vi_model_name: str = "dangvantuan/vietnamese-embedding"
-    en_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
+    en_model_name: str = "BAAI/bge-m3"
 
     # Tham số SemanticChunker
     buffer_size: int = 1
@@ -160,7 +160,7 @@ class SemanticChunkerAgent:
             emb_cfg = EmbConfig(
                 model_name=self._choose_model_name(),
                 vi_model_name=self.cfg.vi_model_name,
-                language=("vi" if self.cfg.language == "vi" else "default"),
+                language="default",
                 device=self.cfg.agent_device,
                 normalize_for_cosine=self.cfg.normalize_for_cosine,
                 metric=self.cfg.metric,
