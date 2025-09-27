@@ -2,7 +2,7 @@
 from src.search.search_agent import SearchAgent, SearchConfig
 from src.embedding.embedding_agent import EmbConfig
 from src.indexing.indexing_agent import AgentConfig
-from src.llm.llm_kernel import KERNEL, GoogleConfig  # hoặc OllamaConfig/OpenAIConfig
+from src.llm.llm_kernel import KERNEL, OpenAIConfig  # hoặc OllamaConfig/OpenAIConfig
 from pymilvus import utility, connections, Collection
 
 def _drop_one_collection(col_name: str) -> None:
@@ -73,12 +73,12 @@ def delete(collection='viquad_demo_1'):
 
 def main():
     # 1) Chọn LLM qua Kernel (UI/ENV của bạn có thể set chỗ khác)
-    KERNEL.set_active_config(GoogleConfig())  # ví dụ: dùng Gemini qua SDK pydantic-ai
+    KERNEL.set_active_config(OpenAIConfig())  # ví dụ: dùng Gemini qua SDK pydantic-ai
     # 2) Cấu hình Search
     s_cfg = SearchConfig(
-        collection_base="viquad_test_2", 
-        faq_top_k=5, doc_top_k=5,
-        tFAQ=0.70, tDOC=0.60,
+        collection_base="viquad_fin_test_1", 
+        faq_top_k=10, doc_top_k=10,
+        tFAQ=0.90, tDOC=0.45,
         metric="COSINE",
         max_ctx_docs=4,
         disclaimer="Lưu ý: Câu trả lời được tổng hợp từ tài liệu hệ thống.",

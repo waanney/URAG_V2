@@ -54,36 +54,13 @@ class SearchConfig(BaseModel):
     max_ctx_docs: int = 4
     disclaimer: Optional[str] = "Lưu ý: Câu trả lời được tổng hợp từ tài liệu hệ thống."
     llm_system_instruction: str = (
-        "Bạn là trợ lý chỉ trả lời dựa trên CONTEXT. Nếu thiếu dữ liệu, hãy nói 'không có thông tin'."
+        "Bạn là một trợ lý AI chuyên phân tích và tổng hợp thông tin từ các tài liệu được cung cấp trong thẻ <CONTEXT>."
+        "Nhiệm vụ của bạn là trả lời câu hỏi trong thẻ <QUESTION> một cách chính xác, tuân thủ nghiêm ngặt các quy tắc sau:\n"
+        "1. **Phân tích & Đối chiếu:** Chỉ được phép sử dụng thông tin nằm trong <CONTEXT>. Tuyệt đối không dùng kiến thức bên ngoài.\n"
+        "2. **Tổng hợp & Trích dẫn:** Luôn trích dẫn nguồn của thông tin bằng cách dùng định dạng `` ngay sau thông tin đó. Ví dụ: 'Tuổi thọ trung bình của khu vực Hà Nội cũ là 79 tuổi .'\n"
+        "3. **Xử lý thiếu thông tin:** Nếu không có tài liệu nào trong <CONTEXT> chứa câu trả lời, hãy trả lời dứt khoát: 'Không có thông tin trong tài liệu cung cấp để trả lời câu hỏi này.'"
     )
 
-    # === Multihop ===
-    enable_multihop: bool = True
-    max_hops: int = 2               # tổng số hop tối đa
-    hop_top_k: int = 4              # top_k khi retrieve cho mỗi hop
-    hop_ctx_docs: int = 3           # số doc đưa vào prompt mỗi hop
-    hop_tDOC: float = 0.55          # ngưỡng relax hơn bước 1
-    hop_branching: int = 1          # 1 = chuỗi tuyến tính, >1 = song song (simple fanout)
-    hop_mode: Literal["auto", "force", "off"] = "auto"
-
-    # Prompt hướng dẫn LLM sinh subquestion hoặc quyết định hop tiếp
-    hop_decompose_instruction: str = (
-        "Bạn là một chuyên gia phân rã câu hỏi phức tạp. "
-        "Với câu hỏi chính sau đây: '{original_question}', hãy chia nó thành các câu hỏi phụ đơn giản hơn. "
-        "Mỗi câu hỏi phụ phải có thể được trả lời độc lập bằng cách tìm kiếm trong một kho tài liệu. "
-        "Các câu trả lời cho các câu hỏi phụ này, khi kết hợp lại, phải giải quyết được toàn bộ câu hỏi chính. "
-        "Trả về dưới dạng JSON: {\"subs\": [\"câu hỏi phụ 1\", \"câu hỏi phụ 2\", ...]}."
-    )
-    hop_reason_instruction: str = (
-        "Dựa vào CONTEXT được cung cấp, hãy trả lời cho câu hỏi phụ hiện tại: '{current_sub_question}'. "
-        "Sau đó, hãy xem xét câu hỏi gốc: '{original_question}'. "
-        "1. Tổng hợp thông tin từ CONTEXT để tạo ra một câu trả lời cho câu hỏi phụ (partial_answer). "
-        "2. Dựa trên những gì đã biết, xác định thông tin còn thiếu để có thể trả lời đầy đủ câu hỏi gốc. "
-        "3. Nếu cần thêm thông tin, hãy tạo ra một câu hỏi phụ TIẾP THEO (next) để tìm kiếm thông tin đó. "
-        "4. Nếu đã đủ thông tin, hãy đặt 'next' là null. "
-        "Trả về kết quả dưới dạng JSON: "
-        "{\"partial_answer\": \"(Câu trả lời tổng hợp từ context)\", \"next\": \"(Câu hỏi tiếp theo)\" or null}."
-    )
 
     @field_validator("tFAQ", "tDOC")
     @classmethod
@@ -102,22 +79,6 @@ class Hit(BaseModel):
     answer: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
 
-# ===== Multihop data models =====
-class HopTrace(BaseModel):
-    hop_id: int
-    subquery: str
-    latency_ms: int
-    params: Dict[str, Any]
-    doc_hits: List[Hit] = []
-    ctx_used: List[Hit] = []
-    prompt: Optional[str] = None
-    partial_answer: Optional[str] = None
-
-class MultiHopDecision(BaseModel):
-    need_multihop: bool = True   # auto switch; có thể override bằng config
-    num_hops: int = 2            # gợi ý số hop nếu detect được
-
-
 class SearchTrace(BaseModel):
     latency_ms: int
     params: Dict[str, Any]
@@ -126,9 +87,6 @@ class SearchTrace(BaseModel):
     doc_hits: Optional[List[Hit]] = None
     ctx_used: Optional[List[Hit]] = None
     prompt: Optional[str] = None
-    #====Hop===
-    hops: Optional[List[HopTrace]] = None
-    multihop_decision: Optional[List[HopTrace]] = None
 
 class SearchResponse(BaseModel):
     tier: Literal["faq", "doc", "none"]
@@ -148,15 +106,13 @@ class SearchAgent:
         self.embedder = embedder or EmbedderAgent(e_cfg or EmbConfig())
         self.indexer = indexer or IndexingAgent(i_cfg or AgentConfig())
 
-        llm_model = KERNEL.get_active_model(model_name="gemini-2.0-flash")
+        # Lấy model do UI/ENV chọn qua KERNEL, tạo pydantic-ai Agent với system prompt cố định
+        llm_model = KERNEL.get_active_model(model_name="chatgpt-o4-mini")
         self._llm_agent = Agent(llm_model, system_prompt=self.s_cfg.llm_system_instruction)
-        self._decompose_agent = Agent(llm_model, system_prompt="Bạn là chuyên gia phân rã truy vấn.")
-        self._reason_agent = Agent(llm_model, system_prompt="Bạn là chuyên gia suy luận từng bước dựa trên CONTEXT.")
 
         # khớp suffix từ IndexingAgent để tránh lệch tên
         self.doc_collection = f"{self.s_cfg.collection_base}{self.indexer.cfg.doc_suffix}"
         self.faq_collection = f"{self.s_cfg.collection_base}{self.indexer.cfg.faq_suffix}"
-        
 
     # ---------------- public API ----------------
     def answer(self, query: str) -> SearchResponse:
@@ -284,28 +240,3 @@ class SearchAgent:
             f"<CONTEXT>\n{ctx}\n</CONTEXT>\n\n"
             f"Chỉ dùng CONTEXT để trả lời. Nếu không đủ dữ liệu, nói rõ không có thông tin."
         )
-    
-    def _decide_multihop(self, query: str) -> MultiHopDecision:
-        if self.s_cfg.hop_mode == "off":
-            return MultiHopDecision(need_multihop=False, num_hops=1)
-        if self.s_cfg.hop_mode == "force":
-            return MultiHopDecision(need_multihop=True, num_hops=self.s_cfg.max_hops)
-
-        # AUTO: heuristic + 1 câu gọi LLM ngắn
-        # Heuristic rẻ: dấu hiệu bridge/comparison/compositional
-        lower = query.lower()
-        heuristic = any(k in lower for k in [
-            "so sánh", "kết hợp", "liên hệ", "trước khi", "sau đó",
-            "dựa trên", "từ tài liệu a và b", "bằng chứng", "why", "how many", "chain of thought"
-        ])
-        if heuristic:
-            return MultiHopDecision(need_multihop=True, num_hops=min(2, self.s_cfg.max_hops))
-
-        # Hỏi LLM siêu ngắn (không tốn nhiều token)
-        prompt = f"Q: {query}\nHãy trả lời yes/no: có cần nhiều bước (multihop) để trả lời không?"
-        try:
-            ans = self._decompose_agent.run_sync(prompt).output.strip().lower()
-            need = "yes" in ans or "cần" in ans
-        except Exception:
-            need = False
-        return MultiHopDecision(need_multihop=need, num_hops=(2 if need else 1))

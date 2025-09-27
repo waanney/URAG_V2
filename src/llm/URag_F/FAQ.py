@@ -43,14 +43,29 @@ class QuestionVariantsOut(BaseModel):
 
 PROMPT_GENERATE = """
 # ROLE
-Bạn là công cụ trích xuất FAQ từ tài liệu.
+Bạn là một chuyên gia tạo bộ câu hỏi thường gặp (FAQ) từ tài liệu được cung cấp. Mục tiêu của bạn là tạo ra các cặp câu hỏi và câu trả lời súc tích, chính xác và hữu ích.
 
 # INPUT
-DOCUMENT:
+<document>
 {document}
+</document>
 
 # INSTRUCTIONS
-- Tạo ÍT NHẤT {min_pairs} cặp (question, answer).
+1.  **Nghiêm túc phân tích** nội dung trong thẻ `<document>`.
+2.  Tạo ra **ít nhất {min_pairs} cặp câu hỏi và câu trả lời** chất lượng cao.
+3.  **YÊU CẦU VỀ CÂU HỎI:**
+    * Ngắn gọn, rõ ràng, và đi thẳng vào vấn đề mà người dùng có thể quan tâm.
+    * Ưu tiên các câu hỏi về: định nghĩa ("...là gì?"), chức năng ("làm thế nào để...?"), quy trình ("các bước thực hiện..."), so sánh ("sự khác biệt giữa...").
+4.  **YÊU CẦU VỀ CÂU TRẢ LỜI:**
+    * **CHỈ ĐƯỢC PHÉP** trích xuất hoặc tóm tắt thông tin trực tiếp từ `<document>`.
+    * **TUYỆT ĐỐI KHÔNG** suy diễn, bình luận, hoặc thêm thông tin không có trong văn bản.
+5.  **RÀNG BUỘC PHỦ ĐỊNH (NHỮNG ĐIỀU CẦN TRÁNH):**
+    * Không tạo các câu hỏi trùng lặp về ý nghĩa.
+    * Không hỏi những câu yêu cầu ý kiến cá nhân ("bạn nghĩ sao về...?").
+    * Nếu tài liệu quá ngắn hoặc không đủ thông tin để tạo `{min_pairs}` câu hỏi chất lượng, hãy tạo ít hơn thay vì bịa đặt.
+
+# INSTRUCTIONS
+- Tạo ra chính xác {min_pairs} cặp (question, answer).
 - Câu hỏi ngắn gọn, bám sát tài liệu; tránh trùng lặp.
 - Câu trả lời CHỈ dựa trên DOCUMENT; không suy diễn, không bịa.
 
@@ -65,18 +80,29 @@ DOCUMENT:
 
 PROMPT_ENRICH_QUESTIONS = """
 # ROLE
-Bạn là bộ máy ENRICH FAQ: chỉ tạo **biến thể câu hỏi** tự nhiên, KHÔNG tạo câu trả lời.
+Bạn là một chuyên gia sáng tạo nội dung, có nhiệm vụ tạo ra các biến thể câu hỏi (paraphrasing) một cách tự nhiên và đa dạng.
 
 # INPUT
-- SEED_QUESTION: "{seed_q}"
-- SEED_ANSWER: "{seed_a}"  # dùng để hiểu phạm vi/ý nghĩa; KHÔNG được tạo lại câu trả lời.
+<seed_question>
+{seed_q}
+</seed_question>
+
+<seed_answer_context>
+{seed_a}
+</seed_answer_context>
 
 # INSTRUCTIONS
-- Sinh ÍT NHẤT {n_variants} biến thể cách hỏi khác nhau (tự nhiên, rõ ràng).
-- Giữ NGUYÊN Ý NGHĨA như SEED_QUESTION; không mở rộng/thu hẹp phạm vi.
-- Không thêm điều kiện mới; không mơ hồ; không bịa.
-- Đa dạng kiểu hỏi: có/không, when/where/how, rút gọn, đảo cụm từ, đồng nghĩa, chính tả phổ biến.
-- Tránh lặp lại gần như hệt nhau; bỏ các biến thể trùng.
+1.  **Phân tích:** Đọc kỹ `<seed_question>` và `<seed_answer_context>` để hiểu rõ ý nghĩa cốt lõi và phạm vi của câu hỏi gốc.
+2.  **Sáng tạo:** Dựa trên ý nghĩa cốt lõi đó, sinh ra **ít nhất {n_variants} biến thể câu hỏi** mới.
+3.  **YÊU CẦU VỀ BIẾN THỂ:**
+    * **GIỮ NGUYÊN Ý NGHĨA:** Các câu hỏi mới phải hỏi về cùng một vấn đề như câu hỏi gốc.
+    * **ĐA DẠNG HÓA:** Sử dụng nhiều cách diễn đạt khác nhau: câu hỏi có/không, câu hỏi Wh- (what, how, why), dùng từ đồng nghĩa, đảo cấu trúc, dạng rút gọn...
+    * **TỰ NHIÊN:** Nghe giống như cách một người thật sẽ hỏi.
+4.  **RÀNG BUỘC PHỦ ĐỊNH:**
+    * **KHÔNG** thay đổi, mở rộng hay thu hẹp ý nghĩa của câu hỏi gốc.
+    * **KHÔNG** tạo lại câu trả lời.
+    * Loại bỏ các biến thể gần như giống hệt nhau.
+
 
 # OUTPUT (JSON STRICT)
 {{
@@ -103,8 +129,8 @@ class FAQAgent:
         self,
         api_key: Optional[str] = None,
         model_name: Optional[str] = 'gemini-2.0-flash',
-        min_pairs:int = 4,
-        enrich_pairs_per_seed: int = 4,
+        min_pairs:int = 2,
+        enrich_pairs_per_seed: int = 2,
     ):
         self.model = KERNEL.get_active_model(model_name=model_name)
         self.min_pairs = int(min_pairs)

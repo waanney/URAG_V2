@@ -38,7 +38,7 @@ class DManagerConfig:
     # Chunker
     lang: Literal["default", "vi", "en"] = "default"
     buffer_size: int = 1
-    min_chunk_size: Optional[int] = None
+    min_chunk_size: Optional[int] = 900
     number_of_chunks: Optional[int] = None
 
     # Embedding
@@ -168,7 +168,7 @@ class URagDManager:
         )
 
         # 3) Augmenter — dùng lại textGenerate.py (hoặc NoOp)
-        self.augmenter: IAugmenter = augmenter or ExistingTextGenerateAugmenter()
+        self.augmenter: IAugmenter = augmenter or NoOpAugmenter()
 
         # 4) Embedder
         self.embedder = EmbedderAgent(EmbConfig(
@@ -260,7 +260,7 @@ class URagDManager:
         for a in self._augmented:
             headline = a.get("headline", "")
             emb_inputs.append({
-                "text": a["transformed"],
+                "text": a["original"],
                 "source": a["doc_id"],
                 "metadata": {"chunk_id": a["chunk_id"],
                               "original": a["original"],
