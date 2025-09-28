@@ -10,11 +10,11 @@ import os, json
 from typing import List, Dict, Any
 
 # ======================== CONFIG ========================
-CSV_PATH       = "datasets/test.csv"  # <-- ĐƯỜNG DẪN CSV CỦA BẠN
+CSV_PATH       = "datasets/viquad_data.csv"  # <-- ĐƯỜNG DẪN CSV CỦA BẠN
 CONTEXT_COL    = "context"               # tên cột mang nội dung
 ID_COL         = "id"                    # cột id (optional, để None nếu không có)
-MIN_LEN        = 5                       # bỏ qua context quá ngắn
-COLLECTION     = "viquad_test_2"      # tên base của collection Milvus
+MIN_LEN        = 5                      # bỏ qua context quá ngắn
+COLLECTION     = "viquad_final_0"      # tên base của collection Milvus
 LANGUAGE       = "default"               # "vi" | "default"
 DEFAULT_SOURCE = "csv_src"
 

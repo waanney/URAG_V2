@@ -16,7 +16,7 @@ Ghi chú:
 """
 
 from __future__ import annotations
-from typing import Any, Dict, List, Optional, Literal, Tuple
+from typing import Any, Dict, List, Optional, Literal, Tuple, Sequence
 import time
 
 from pydantic import BaseModel, Field, field_validator
@@ -27,8 +27,78 @@ from src.embedding.embedding_agent import EmbedderAgent, EmbConfig
 from src.indexing.indexing_agent import IndexingAgent, AgentConfig, SearchReq
 from src.llm.llm_kernel import KERNEL
 
+from rapidfuzz import fuzz
 
+import torch
+from sentence_transformers import CrossEncoder
 # ======================= Search agent (Pydantic) =======================
+
+class CrossEncoderReranker:
+    """
+    Reranker cross-encoder: nhận (query, candidate_text) -> score ∈ ℝ (càng cao càng liên quan).
+    Hỗ trợ batch, tự chọn device (cuda/mps/cpu).
+    """
+    def __init__(self, model_name: str = "BAAI/bge-reranker-base", max_length: int = 512):
+        self.device = ("cuda" if torch.cuda.is_available()
+                       else "mps" if torch.backends.mps.is_available()
+                       else "cpu")
+        self.model = CrossEncoder(model_name, max_length=max_length, device=self.device)
+
+    @torch.inference_mode()
+    def score(self, query: str, cands: Sequence[str], batch_size: int = 32) -> List[float]:
+        """
+        Trả về list score (float) tương ứng với từng candidate trong cands.
+        """
+        if not cands:
+            return []
+        pairs: List[Tuple[str, str]] = [(query, c) for c in cands]
+        scores = self.model.predict(pairs, batch_size=batch_size, convert_to_numpy=True, show_progress_bar=False)
+        return [float(s) for s in scores]
+
+def _entity_overlap(a: str, b: str, entities: List[str]) -> int:
+    aL, bL = a.lower(), b.lower()
+    return sum(1 for e in entities if e and e.lower() in aL and e.lower() in bL)
+
+def _extract_simple_entities(q: str) -> List[str]:
+    # Nhanh-gọn: lấy chuỗi có chữ cái đầu viết hoa (tên riêng), hoặc tự liệt kê từ khóa tay
+    toks = [t.strip(",.?;:()[]") for t in q.split()]
+    cands = [t for t in toks if t[:1].isupper() and len(t) > 1]
+    # ví dụ: gom lại cặp tên ghép 2 từ
+    join2 = []
+    i = 0
+    while i < len(cands)-1:
+        if cands[i][0].isupper() and cands[i+1][0].isupper():
+            join2.append(cands[i] + " " + cands[i+1])
+            i += 2
+        else:
+            i += 1
+    return list(set(cands + join2))
+
+def _accept_faq(
+    query: str,
+    cand_q: str,
+    cos_sim: float,
+    *,
+    require_entity: bool = True,
+    min_lexical: int = 60,
+    rerank_score: Optional[float] = None,
+    rerank_min: float = 0.50,
+    must_entities: Optional[List[str]] = None,
+) -> bool:
+    # 1) cosine gate
+    if cos_sim < 0.70:  # <-- tăng ngưỡng an toàn
+        return False
+    # 2) lexical sanity via partial_ratio (rẻ, tránh paraphrase lệch nghĩa)
+    if fuzz.partial_ratio(query, cand_q) < min_lexical:
+        return False
+    # 3) entity overlap (nếu query có tên riêng)
+    if require_entity and must_entities:
+        if _entity_overlap(query, cand_q, must_entities) == 0:
+            return False
+    # 4) cross-encoder rerank (nếu có)
+    if rerank_score is not None and rerank_score < rerank_min:
+        return False
+    return True
 
 Metric = Literal["COSINE", "IP", "L2"]
 
@@ -54,36 +124,18 @@ class SearchConfig(BaseModel):
     max_ctx_docs: int = 4
     disclaimer: Optional[str] = "Lưu ý: Câu trả lời được tổng hợp từ tài liệu hệ thống."
     llm_system_instruction: str = (
-        "Bạn là trợ lý chỉ trả lời dựa trên CONTEXT. Nếu thiếu dữ liệu, hãy nói 'không có thông tin'."
+        "Bạn là một trợ lý AI chuyên phân tích và tổng hợp thông tin từ các tài liệu được cung cấp trong thẻ <CONTEXT>."
+        "Nhiệm vụ của bạn là trả lời câu hỏi trong thẻ <QUESTION> một cách chính xác, tuân thủ nghiêm ngặt các quy tắc sau:\n"
+        "1. **Phân tích & Đối chiếu:** Chỉ được phép sử dụng thông tin nằm trong <CONTEXT>. Tuyệt đối không dùng kiến thức bên ngoài.\n"
+        "2. **Tổng hợp & Trích dẫn:** Luôn trích dẫn nguồn của thông tin bằng cách dùng định dạng `` ngay sau thông tin đó. Ví dụ: 'Tuổi thọ trung bình của khu vực Hà Nội cũ là 79 tuổi .'\n"
+        "3. **Xử lý thiếu thông tin:** Nếu không có tài liệu nào trong <CONTEXT> chứa câu trả lời, hãy trả lời dứt khoát: 'Không có thông tin trong tài liệu cung cấp để trả lời câu hỏi này.'"
     )
 
-    # === Multihop ===
-    enable_multihop: bool = True
-    max_hops: int = 2               # tổng số hop tối đa
-    hop_top_k: int = 4              # top_k khi retrieve cho mỗi hop
-    hop_ctx_docs: int = 3           # số doc đưa vào prompt mỗi hop
-    hop_tDOC: float = 0.55          # ngưỡng relax hơn bước 1
-    hop_branching: int = 1          # 1 = chuỗi tuyến tính, >1 = song song (simple fanout)
-    hop_mode: Literal["auto", "force", "off"] = "auto"
-
-    # Prompt hướng dẫn LLM sinh subquestion hoặc quyết định hop tiếp
-    hop_decompose_instruction: str = (
-        "Bạn là một chuyên gia phân rã câu hỏi phức tạp. "
-        "Với câu hỏi chính sau đây: '{original_question}', hãy chia nó thành các câu hỏi phụ đơn giản hơn. "
-        "Mỗi câu hỏi phụ phải có thể được trả lời độc lập bằng cách tìm kiếm trong một kho tài liệu. "
-        "Các câu trả lời cho các câu hỏi phụ này, khi kết hợp lại, phải giải quyết được toàn bộ câu hỏi chính. "
-        "Trả về dưới dạng JSON: {\"subs\": [\"câu hỏi phụ 1\", \"câu hỏi phụ 2\", ...]}."
-    )
-    hop_reason_instruction: str = (
-        "Dựa vào CONTEXT được cung cấp, hãy trả lời cho câu hỏi phụ hiện tại: '{current_sub_question}'. "
-        "Sau đó, hãy xem xét câu hỏi gốc: '{original_question}'. "
-        "1. Tổng hợp thông tin từ CONTEXT để tạo ra một câu trả lời cho câu hỏi phụ (partial_answer). "
-        "2. Dựa trên những gì đã biết, xác định thông tin còn thiếu để có thể trả lời đầy đủ câu hỏi gốc. "
-        "3. Nếu cần thêm thông tin, hãy tạo ra một câu hỏi phụ TIẾP THEO (next) để tìm kiếm thông tin đó. "
-        "4. Nếu đã đủ thông tin, hãy đặt 'next' là null. "
-        "Trả về kết quả dưới dạng JSON: "
-        "{\"partial_answer\": \"(Câu trả lời tổng hợp từ context)\", \"next\": \"(Câu hỏi tiếp theo)\" or null}."
-    )
+    accept_require_entity: bool = True
+    accept_min_lexical: int = 60  # rapidfuzz.partial_ratio
+    reranker_name: Optional[str] = None  # "bge-reranker-base" / "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    reranker_min_score: float = 0.50
+    prefer_source_order: Optional[str] = None  # ["doc_qa_generated", "paraphrase_generated"]
 
     @field_validator("tFAQ", "tDOC")
     @classmethod
@@ -100,23 +152,7 @@ class Hit(BaseModel):
     text: Optional[str] = None
     question: Optional[str] = None
     answer: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
-
-# ===== Multihop data models =====
-class HopTrace(BaseModel):
-    hop_id: int
-    subquery: str
-    latency_ms: int
-    params: Dict[str, Any]
-    doc_hits: List[Hit] = []
-    ctx_used: List[Hit] = []
-    prompt: Optional[str] = None
-    partial_answer: Optional[str] = None
-
-class MultiHopDecision(BaseModel):
-    need_multihop: bool = True   # auto switch; có thể override bằng config
-    num_hops: int = 2            # gợi ý số hop nếu detect được
-
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 class SearchTrace(BaseModel):
     latency_ms: int
@@ -126,9 +162,6 @@ class SearchTrace(BaseModel):
     doc_hits: Optional[List[Hit]] = None
     ctx_used: Optional[List[Hit]] = None
     prompt: Optional[str] = None
-    #====Hop===
-    hops: Optional[List[HopTrace]] = None
-    multihop_decision: Optional[List[HopTrace]] = None
 
 class SearchResponse(BaseModel):
     tier: Literal["faq", "doc", "none"]
@@ -148,20 +181,27 @@ class SearchAgent:
         self.embedder = embedder or EmbedderAgent(e_cfg or EmbConfig())
         self.indexer = indexer or IndexingAgent(i_cfg or AgentConfig())
 
-        llm_model = KERNEL.get_active_model(model_name="gemini-2.0-flash")
+        # Lấy model do UI/ENV chọn qua KERNEL, tạo pydantic-ai Agent với system prompt cố định
+        llm_model = KERNEL.get_active_model(model_name="gpt-4o-mini")
         self._llm_agent = Agent(llm_model, system_prompt=self.s_cfg.llm_system_instruction)
-        self._decompose_agent = Agent(llm_model, system_prompt="Bạn là chuyên gia phân rã truy vấn.")
-        self._reason_agent = Agent(llm_model, system_prompt="Bạn là chuyên gia suy luận từng bước dựa trên CONTEXT.")
 
         # khớp suffix từ IndexingAgent để tránh lệch tên
         self.doc_collection = f"{self.s_cfg.collection_base}{self.indexer.cfg.doc_suffix}"
         self.faq_collection = f"{self.s_cfg.collection_base}{self.indexer.cfg.faq_suffix}"
-        
+
+        self._reranker = None
+        if self.s_cfg.reranker_name:  # ví dụ: "BAAI/bge-reranker-base" hoặc "cross-encoder/ms-marco-MiniLM-L-6-v2"
+            try:
+                self._reranker = CrossEncoderReranker(self.s_cfg.reranker_name)
+            except Exception as e:
+                # Không chặn pipeline nếu load thất bại
+                print(f"[Reranker] Load failed ({self.s_cfg.reranker_name}): {e}")
+                self._reranker = None
 
     # ---------------- public API ----------------
     def answer(self, query: str) -> SearchResponse:
         t0 = time.time()
-
+        self._last_query_text = query
         # 1) embed query
         q_vec = self.embedder.encode([query])[0]  # List[float]
 
@@ -223,6 +263,62 @@ class SearchAgent:
         if res.get("status") != "ok":
             return [], None
         hits = self._pp_hits(res["data"].get("results", []), is_faq=True)
+        if self._reranker and hits:
+            # Ghép text ứng viên: ưu tiên question; có thể nối answer để tăng tín hiệu
+            cand_texts = []
+            for h in hits:
+                q = h.question or ""
+                a = h.answer or ""
+                # Bạn có thể thay đổi template bên dưới:
+                cand_texts.append(f"Q: {q}\nA: {a}".strip())
+
+            r_scores = self._reranker.score(self._last_query_text, cand_texts, batch_size=32) \
+                       if hasattr(self, "_last_query_text") else \
+                       self._reranker.score("", cand_texts, batch_size=32)
+
+            # Lưu điểm vào metadata và áp gate
+            for h, rs in zip(hits, r_scores):
+                if h.metadata is None:
+                    h.metadata = {}
+                h.metadata["rerank_score"] = rs
+
+            # Lọc theo _accept_faq (cosine gate + lexical + entity + rerank_min)
+            ents = _extract_simple_entities(self._last_query_text) if hasattr(self, "_last_query_text") else []
+            filtered = []
+            for h in hits:
+                ok = _accept_faq(
+                    self._last_query_text,
+                    h.question or "",
+                    h.similarity,
+                    require_entity=self.s_cfg.accept_require_entity,
+                    min_lexical=self.s_cfg.accept_min_lexical,
+                    rerank_score=h.metadata.get("rerank_score"),
+                    rerank_min=self.s_cfg.reranker_min_score,
+                    must_entities=ents,
+                )
+                if ok:
+                    filtered.append(h)
+            hits = filtered or hits  # nếu lọc sạch, giữ nguyên top-K để tránh "mất tiếng"
+
+            # Re-rank: blend similarity (Milvus) + rerank_score (CrossEncoder)
+            # Chuẩn hoá mềm: sim_norm ∈ [0,1]; rr_norm dùng sigmoid nếu model ko trả về [0,1]
+            def _sigmoid(x: float) -> float:
+                import math
+                return 1.0 / (1.0 + math.exp(-x))
+
+            def _norm_rr(v: float) -> float:
+                # Heuristic: nếu điểm đã ở [0,1] thì dùng trực tiếp; nếu >1 thì sigmoid
+                return v if 0.0 <= v <= 1.0 else _sigmoid(v)
+
+            alpha = 0.5  # trọng số cho Milvus similarity (0.0..1.0). Bạn có thể cho vào config
+            for h in hits:
+                rr = _norm_rr(float(h.metadata.get("rerank_score", 0.0)))
+                score_mix = alpha * h.similarity + (1.0 - alpha) * rr
+                h.metadata["score_mix"] = score_mix
+
+            hits.sort(key=lambda x: x.metadata.get("score_mix", x.similarity), reverse=True)
+
+        # best là hits[0] (sau (re)rank)
         return hits, (hits[0] if hits else None)
 
     def _search_doc(self, q_vec: List[float]) -> List[Hit]:
@@ -284,28 +380,3 @@ class SearchAgent:
             f"<CONTEXT>\n{ctx}\n</CONTEXT>\n\n"
             f"Chỉ dùng CONTEXT để trả lời. Nếu không đủ dữ liệu, nói rõ không có thông tin."
         )
-    
-    def _decide_multihop(self, query: str) -> MultiHopDecision:
-        if self.s_cfg.hop_mode == "off":
-            return MultiHopDecision(need_multihop=False, num_hops=1)
-        if self.s_cfg.hop_mode == "force":
-            return MultiHopDecision(need_multihop=True, num_hops=self.s_cfg.max_hops)
-
-        # AUTO: heuristic + 1 câu gọi LLM ngắn
-        # Heuristic rẻ: dấu hiệu bridge/comparison/compositional
-        lower = query.lower()
-        heuristic = any(k in lower for k in [
-            "so sánh", "kết hợp", "liên hệ", "trước khi", "sau đó",
-            "dựa trên", "từ tài liệu a và b", "bằng chứng", "why", "how many", "chain of thought"
-        ])
-        if heuristic:
-            return MultiHopDecision(need_multihop=True, num_hops=min(2, self.s_cfg.max_hops))
-
-        # Hỏi LLM siêu ngắn (không tốn nhiều token)
-        prompt = f"Q: {query}\nHãy trả lời yes/no: có cần nhiều bước (multihop) để trả lời không?"
-        try:
-            ans = self._decompose_agent.run_sync(prompt).output.strip().lower()
-            need = "yes" in ans or "cần" in ans
-        except Exception:
-            need = False
-        return MultiHopDecision(need_multihop=need, num_hops=(2 if need else 1))

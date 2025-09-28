@@ -3100,6 +3100,7 @@ dependencies = [
     { name = "pymilvus" },
     { name = "pytest" },
     { name = "python-dotenv" },
+    { name = "rapidfuzz" },
     { name = "sentence-transformers" },
     { name = "streamlit" },
 ]
@@ -3149,6 +3150,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.2" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0.0" },
     { name = "python-dotenv", specifier = ">=1.1.1" },
+    { name = "rapidfuzz", specifier = ">=3.14.1" },
     { name = "rapidfuzz", marker = "extra == 'parse'", specifier = ">=3.9.6" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5.7" },
     { name = "sentence-transformers", specifier = ">=5.1.0" },
