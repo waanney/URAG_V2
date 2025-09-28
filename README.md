@@ -71,7 +71,7 @@ Code flow: Under the src/
     1,"This is a paragraph about the policy..."
     2,"Another paragraph..."
 ## Advanced: Data format behind the scene:
-- FAQ:
+### FAQ:
     {"question":"How to apply?", "answer":"Submit the form at ...", "canonical_id":"faq-001", "metadata":{"source":"policy.pdf"}}
 
 # Code APIs:
@@ -82,7 +82,7 @@ Code flow: Under the src/
 + run_from_documents(documents: List[{"doc_id","text","metadata?"}])
 + run_from_faqs(roots: List[{"question","answer",...}])
 + run_from_csv_contexts(csv_path, context_col="context", id_col=None, min_len=5, default_source="csv_src")
-- Example: docs folder → full pipeline
+### Example: docs folder → full pipeline
     from src.managers.meta_manager import MetaManager, MetaManagerConfig
 
     mm = MetaManager(MetaManagerConfig(
@@ -91,11 +91,11 @@ Code flow: Under the src/
     ))
     res = mm.run(input_path="data/docs", input_type="docs")
     print(res)
-- Example: FAQ JSON → enrich + index
+### Example: FAQ JSON → enrich + index
     mm = MetaManager(MetaManagerConfig(collection_base="ura_rag_faq"))
     res = mm.run(input_path="data/faqs.json", input_type="faqs")
     print(res)
-- Example: CSV contexts
+### Example: CSV contexts
     res = mm.run_from_csv_contexts(
         csv_path="datasets/sample.csv",
         context_col="context",
@@ -113,7 +113,7 @@ Code flow: Under the src/
 + run_pipeline(root_dir=None, collection_base=None) → index docs to __doc
 + run_pipeline_from_records(documents, collection_base=None) → in-memory
 + get_augmented_chunks() → pass to FManager later
-- Example: custom config + augmentation
+### Example: custom config + augmentation:
     from src.managers.urag_d_manager import DManagerConfig, URagDManager, ExistingTextGenerateAugmenter
 
     cfg = DManagerConfig(
@@ -138,7 +138,7 @@ Code flow: Under the src/
 - Common entrypoints
 + run_from_augmented(augmented, collection_base, paraphrase_n=5, metric="COSINE")
 + run_from_roots(roots, collection_base, paraphrase_n=5, metric="COSINE")
-- Example: build FAQ from augmented chunks:
+### Example: build FAQ from augmented chunks:
     from src.managers.urag_f_manager import FManager, FManagerConfig
     from src.managers.meta_manager import MetaManagerConfig, FAQGeneratorAdapter
     from src.embedding.embedding_agent import EmbedderAgent, EmbConfig
@@ -153,7 +153,7 @@ Code flow: Under the src/
     print(res)
 ## LLM KERNEL:
 - What it does: Central place to pick LLM provider without changing agent code.
-- Typical usage (pseudocode – depends on your llm_kernel.py):
+### Typical usage (pseudocode – depends on your llm_kernel.py):
     from src.llm.llm_kernel import KERNEL, GoogleConfig, OpenAIConfig, OllamaConfig
     KERNEL.set_active_config(GoogleConfig(api_key=os.getenv("GOOGLE_API_KEY")))
 ## Embedder HAK:
