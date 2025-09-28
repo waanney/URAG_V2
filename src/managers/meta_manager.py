@@ -45,8 +45,8 @@ class FAQGeneratorAdapter(IFaqGenerator):
     """
     def __init__(
         self,
-        min_pairs: int = 4,
-        enrich_pairs_per_seed: int = 4,
+        min_pairs: int = 2,
+        enrich_pairs_per_seed: int = 2,
     ):
         # Không truyền api_key/model_name -> FAQAgent sẽ gọi KERNEL.get_active_model()
         self._agent = FAQAgent(
@@ -68,7 +68,7 @@ class FAQGeneratorAdapter(IFaqGenerator):
         for ch in augmented_chunks:
             # chọn text tốt nhất để extract Q/A (ưu tiên augmented)
             headline = (ch.get("metadata") or {}).get("headline", "")
-            content = ch.get("transformed") or ch.get("text") or ch.get("original") or ""   
+            content = ch.get("original") or ch.get("text") or ch.get("transformed") or ""  
             text = f"[Tiêu đề tóm tắt: {headline}]\n\n{content}" if headline else content
             if not isinstance(text, str) or not text.strip():
                 continue
@@ -148,8 +148,8 @@ class MetaManagerConfig:
     language: str = "default"  # "vi" | "default"
 
     # FAQ gen (model/key do KERNEL quyết định; giữ các tham số nội bộ cho FAQAgent)
-    faq_min_pairs: int = 4
-    faq_paraphrase_n: int = 5
+    faq_min_pairs: int = 2
+    faq_paraphrase_n: int = 2
 
     # children configs
     d_manager_config: DManagerConfig = field(default_factory=DManagerConfig)
