@@ -13,10 +13,11 @@ Comes with 2 managers for 2 tasks, with a meta manager controls the workflow wit
 - 🧰 Uses uv for fast, reliable Python environment management.
 
 # Requirements:
-- Python 3.10+
+- Python 3.10+, recommend using the lastest version.
 - uv (package manager)
 - Docker + Docker Compose (for Milvus)
 - GPU (optional, for faster embedding and LLM inference)
+- API Keys for LLM services, or just use ollama if you have a super strong pc
 
 # Setting up the environment:
 ## Setup with uv:
