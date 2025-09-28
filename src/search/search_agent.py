@@ -16,7 +16,7 @@ Ghi chú:
 """
 
 from __future__ import annotations
-from typing import Any, Dict, List, Optional, Literal, Tuple
+from typing import Any, Dict, List, Optional, Literal, Tuple, Sequence
 import time
 
 from pydantic import BaseModel, Field, field_validator
@@ -27,8 +27,78 @@ from src.embedding.embedding_agent import EmbedderAgent, EmbConfig
 from src.indexing.indexing_agent import IndexingAgent, AgentConfig, SearchReq
 from src.llm.llm_kernel import KERNEL
 
+from rapidfuzz import fuzz
 
+import torch
+from sentence_transformers import CrossEncoder
 # ======================= Search agent (Pydantic) =======================
+
+class CrossEncoderReranker:
+    """
+    Reranker cross-encoder: nhận (query, candidate_text) -> score ∈ ℝ (càng cao càng liên quan).
+    Hỗ trợ batch, tự chọn device (cuda/mps/cpu).
+    """
+    def __init__(self, model_name: str = "BAAI/bge-reranker-base", max_length: int = 512):
+        self.device = ("cuda" if torch.cuda.is_available()
+                       else "mps" if torch.backends.mps.is_available()
+                       else "cpu")
+        self.model = CrossEncoder(model_name, max_length=max_length, device=self.device)
+
+    @torch.inference_mode()
+    def score(self, query: str, cands: Sequence[str], batch_size: int = 32) -> List[float]:
+        """
+        Trả về list score (float) tương ứng với từng candidate trong cands.
+        """
+        if not cands:
+            return []
+        pairs: List[Tuple[str, str]] = [(query, c) for c in cands]
+        scores = self.model.predict(pairs, batch_size=batch_size, convert_to_numpy=True, show_progress_bar=False)
+        return [float(s) for s in scores]
+
+def _entity_overlap(a: str, b: str, entities: List[str]) -> int:
+    aL, bL = a.lower(), b.lower()
+    return sum(1 for e in entities if e and e.lower() in aL and e.lower() in bL)
+
+def _extract_simple_entities(q: str) -> List[str]:
+    # Nhanh-gọn: lấy chuỗi có chữ cái đầu viết hoa (tên riêng), hoặc tự liệt kê từ khóa tay
+    toks = [t.strip(",.?;:()[]") for t in q.split()]
+    cands = [t for t in toks if t[:1].isupper() and len(t) > 1]
+    # ví dụ: gom lại cặp tên ghép 2 từ
+    join2 = []
+    i = 0
+    while i < len(cands)-1:
+        if cands[i][0].isupper() and cands[i+1][0].isupper():
+            join2.append(cands[i] + " " + cands[i+1])
+            i += 2
+        else:
+            i += 1
+    return list(set(cands + join2))
+
+def _accept_faq(
+    query: str,
+    cand_q: str,
+    cos_sim: float,
+    *,
+    require_entity: bool = True,
+    min_lexical: int = 60,
+    rerank_score: Optional[float] = None,
+    rerank_min: float = 0.50,
+    must_entities: Optional[List[str]] = None,
+) -> bool:
+    # 1) cosine gate
+    if cos_sim < 0.70:  # <-- tăng ngưỡng an toàn
+        return False
+    # 2) lexical sanity via partial_ratio (rẻ, tránh paraphrase lệch nghĩa)
+    if fuzz.partial_ratio(query, cand_q) < min_lexical:
+        return False
+    # 3) entity overlap (nếu query có tên riêng)
+    if require_entity and must_entities:
+        if _entity_overlap(query, cand_q, must_entities) == 0:
+            return False
+    # 4) cross-encoder rerank (nếu có)
+    if rerank_score is not None and rerank_score < rerank_min:
+        return False
+    return True
 
 Metric = Literal["COSINE", "IP", "L2"]
 
@@ -61,6 +131,11 @@ class SearchConfig(BaseModel):
         "3. **Xử lý thiếu thông tin:** Nếu không có tài liệu nào trong <CONTEXT> chứa câu trả lời, hãy trả lời dứt khoát: 'Không có thông tin trong tài liệu cung cấp để trả lời câu hỏi này.'"
     )
 
+    accept_require_entity: bool = True
+    accept_min_lexical: int = 60  # rapidfuzz.partial_ratio
+    reranker_name: Optional[str] = None  # "bge-reranker-base" / "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    reranker_min_score: float = 0.50
+    prefer_source_order: Optional[str] = None  # ["doc_qa_generated", "paraphrase_generated"]
 
     @field_validator("tFAQ", "tDOC")
     @classmethod
@@ -77,7 +152,7 @@ class Hit(BaseModel):
     text: Optional[str] = None
     question: Optional[str] = None
     answer: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 class SearchTrace(BaseModel):
     latency_ms: int
@@ -107,17 +182,26 @@ class SearchAgent:
         self.indexer = indexer or IndexingAgent(i_cfg or AgentConfig())
 
         # Lấy model do UI/ENV chọn qua KERNEL, tạo pydantic-ai Agent với system prompt cố định
-        llm_model = KERNEL.get_active_model(model_name="chatgpt-o4-mini")
+        llm_model = KERNEL.get_active_model(model_name="gpt-4o-mini")
         self._llm_agent = Agent(llm_model, system_prompt=self.s_cfg.llm_system_instruction)
 
         # khớp suffix từ IndexingAgent để tránh lệch tên
         self.doc_collection = f"{self.s_cfg.collection_base}{self.indexer.cfg.doc_suffix}"
         self.faq_collection = f"{self.s_cfg.collection_base}{self.indexer.cfg.faq_suffix}"
 
+        self._reranker = None
+        if self.s_cfg.reranker_name:  # ví dụ: "BAAI/bge-reranker-base" hoặc "cross-encoder/ms-marco-MiniLM-L-6-v2"
+            try:
+                self._reranker = CrossEncoderReranker(self.s_cfg.reranker_name)
+            except Exception as e:
+                # Không chặn pipeline nếu load thất bại
+                print(f"[Reranker] Load failed ({self.s_cfg.reranker_name}): {e}")
+                self._reranker = None
+
     # ---------------- public API ----------------
     def answer(self, query: str) -> SearchResponse:
         t0 = time.time()
-
+        self._last_query_text = query
         # 1) embed query
         q_vec = self.embedder.encode([query])[0]  # List[float]
 
@@ -179,6 +263,62 @@ class SearchAgent:
         if res.get("status") != "ok":
             return [], None
         hits = self._pp_hits(res["data"].get("results", []), is_faq=True)
+        if self._reranker and hits:
+            # Ghép text ứng viên: ưu tiên question; có thể nối answer để tăng tín hiệu
+            cand_texts = []
+            for h in hits:
+                q = h.question or ""
+                a = h.answer or ""
+                # Bạn có thể thay đổi template bên dưới:
+                cand_texts.append(f"Q: {q}\nA: {a}".strip())
+
+            r_scores = self._reranker.score(self._last_query_text, cand_texts, batch_size=32) \
+                       if hasattr(self, "_last_query_text") else \
+                       self._reranker.score("", cand_texts, batch_size=32)
+
+            # Lưu điểm vào metadata và áp gate
+            for h, rs in zip(hits, r_scores):
+                if h.metadata is None:
+                    h.metadata = {}
+                h.metadata["rerank_score"] = rs
+
+            # Lọc theo _accept_faq (cosine gate + lexical + entity + rerank_min)
+            ents = _extract_simple_entities(self._last_query_text) if hasattr(self, "_last_query_text") else []
+            filtered = []
+            for h in hits:
+                ok = _accept_faq(
+                    self._last_query_text,
+                    h.question or "",
+                    h.similarity,
+                    require_entity=self.s_cfg.accept_require_entity,
+                    min_lexical=self.s_cfg.accept_min_lexical,
+                    rerank_score=h.metadata.get("rerank_score"),
+                    rerank_min=self.s_cfg.reranker_min_score,
+                    must_entities=ents,
+                )
+                if ok:
+                    filtered.append(h)
+            hits = filtered or hits  # nếu lọc sạch, giữ nguyên top-K để tránh "mất tiếng"
+
+            # Re-rank: blend similarity (Milvus) + rerank_score (CrossEncoder)
+            # Chuẩn hoá mềm: sim_norm ∈ [0,1]; rr_norm dùng sigmoid nếu model ko trả về [0,1]
+            def _sigmoid(x: float) -> float:
+                import math
+                return 1.0 / (1.0 + math.exp(-x))
+
+            def _norm_rr(v: float) -> float:
+                # Heuristic: nếu điểm đã ở [0,1] thì dùng trực tiếp; nếu >1 thì sigmoid
+                return v if 0.0 <= v <= 1.0 else _sigmoid(v)
+
+            alpha = 0.5  # trọng số cho Milvus similarity (0.0..1.0). Bạn có thể cho vào config
+            for h in hits:
+                rr = _norm_rr(float(h.metadata.get("rerank_score", 0.0)))
+                score_mix = alpha * h.similarity + (1.0 - alpha) * rr
+                h.metadata["score_mix"] = score_mix
+
+            hits.sort(key=lambda x: x.metadata.get("score_mix", x.similarity), reverse=True)
+
+        # best là hits[0] (sau (re)rank)
         return hits, (hits[0] if hits else None)
 
     def _search_doc(self, q_vec: List[float]) -> List[Hit]:

@@ -76,9 +76,9 @@ def main():
     KERNEL.set_active_config(OpenAIConfig())  # ví dụ: dùng Gemini qua SDK pydantic-ai
     # 2) Cấu hình Search
     s_cfg = SearchConfig(
-        collection_base="viquad_fin_test_1", 
-        faq_top_k=10, doc_top_k=10,
-        tFAQ=0.90, tDOC=0.45,
+        collection_base="viquad_fin_test_3", 
+        faq_top_k=20, doc_top_k=5,
+        tFAQ=0.90, tDOC=0.4,
         metric="COSINE",
         max_ctx_docs=4,
         disclaimer="Lưu ý: Câu trả lời được tổng hợp từ tài liệu hệ thống.",
@@ -86,6 +86,8 @@ def main():
         # (tuỳ index) ví dụ HNSW cho Milvus:
         faq_search_params={"metric_type": "COSINE", "params": {"ef": 64}},
         doc_search_params={"metric_type": "COSINE", "params": {"ef": 64}},
+        reranker_name="BAAI/bge-reranker-base",     # hoặc "cross-encoder/ms-marco-MiniLM-L-6-v2"
+        reranker_min_score=0.20,
     )
 
     # 3) (Optional) cấu hình Embedder/Indexer nếu bạn muốn override mặc định
@@ -95,7 +97,7 @@ def main():
     agent = SearchAgent(s_cfg, e_cfg=e_cfg, i_cfg=i_cfg)
 
     # 4) Hỏi thử
-    q = "Vấn đề về lĩnh vực y tế nào mà Hà Nội đang vấp phải tương tự như thành phố Hồ Chí Minh?"
+    q = "Tưởng Giới Thạch và Thi Kiếm Kiềm đã chỉ trích điều gì?"
     resp = agent.answer(q)
 
     

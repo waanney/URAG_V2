@@ -38,7 +38,7 @@ class DManagerConfig:
     # Chunker
     lang: Literal["default", "vi", "en"] = "default"
     buffer_size: int = 1
-    min_chunk_size: Optional[int] = 900
+    min_chunk_size: Optional[int] = 300
     number_of_chunks: Optional[int] = None
 
     # Embedding

@@ -96,6 +96,8 @@ Bạn là một chuyên gia sáng tạo nội dung, có nhiệm vụ tạo ra c�
 2.  **Sáng tạo:** Dựa trên ý nghĩa cốt lõi đó, sinh ra **ít nhất {n_variants} biến thể câu hỏi** mới.
 3.  **YÊU CẦU VỀ BIẾN THỂ:**
     * **GIỮ NGUYÊN Ý NGHĨA:** Các câu hỏi mới phải hỏi về cùng một vấn đề như câu hỏi gốc.
+    * CÂU HỎI MỚI CHỈ CÓ TÁC DỤNG BIỂU DIỄN MỘT CÁCH DIỄN ĐẠT KHÁC
+    * CÂU HỎI MỚI CÓ CÂU TRẢ LỜI GIỐNG VỚI CÂU HỎI GỐC, CÂU TRẢ LỜI GỐC PHẢI TRẢ LỜI ĐƯỢC CÂU HỎI MỚI.
     * **ĐA DẠNG HÓA:** Sử dụng nhiều cách diễn đạt khác nhau: câu hỏi có/không, câu hỏi Wh- (what, how, why), dùng từ đồng nghĩa, đảo cấu trúc, dạng rút gọn...
     * **TỰ NHIÊN:** Nghe giống như cách một người thật sẽ hỏi.
 4.  **RÀNG BUỘC PHỦ ĐỊNH:**
